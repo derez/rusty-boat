@@ -2,11 +2,10 @@
 
 ## Why This Project Exists
 
-The kvapp-c project exists to create a distributed key-value store that demonstrates the Raft consensus algorithm in a practical, educational implementation. This serves multiple purposes:
+The kvapp-c project exists to create a distributed key-value store that demonstrates the Raft consensus algorithm in a practical implementation. This serves multiple purposes:
 
-1. **Educational Value**: Provides a concrete implementation of the Raft consensus algorithm for learning distributed systems concepts
-2. **Reference Implementation**: Serves as a well-documented, testable example of Raft in Rust
-3. **Foundation for Distributed Systems**: Creates a solid base that could be extended for production use cases
+1. **Reference Implementation**: Serves as a well-documented, testable example of Raft in Rust
+2. **Foundation for Distributed Systems**: Creates a solid base that could be extended for production use cases
 
 ## Problems It Solves
 
@@ -24,7 +23,7 @@ The kvapp-c project exists to create a distributed key-value store that demonstr
 
 ### User Experience Goals
 
-**For Developers/Students:**
+**For Developers:**
 - Clear, readable code that demonstrates Raft concepts
 - Comprehensive test suite showing how each component works
 - Well-documented interfaces that explain design decisions
