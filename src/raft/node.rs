@@ -605,15 +605,24 @@ impl RaftNode {
                         }
                     }
                     
-                    // Append new entries
+                    // Append new entries - need to update indices to match the expected positions
                     log::info!(
                         "Node {} appending {} entries starting at index {}",
                         self.config.node_id, request.entries.len(), start_index
                     );
                     
-                    let entries_len = request.entries.len();
+                    // Create entries with correct indices for appending
+                    let mut entries_to_append = Vec::new();
+                    for (i, entry) in request.entries.iter().enumerate() {
+                        let target_index = start_index + i as LogIndex;
+                        // Create new entry with the correct index
+                        let new_entry = LogEntry::new(entry.term, target_index, entry.data.clone());
+                        entries_to_append.push(new_entry);
+                    }
+                    
+                    let entries_len = entries_to_append.len();
                     if let Some(ref mut log_storage) = self.log_storage {
-                        log_storage.append_entries(request.entries)?;
+                        log_storage.append_entries(entries_to_append)?;
                     }
                     
                     // Update commit index
@@ -788,8 +797,7 @@ impl RaftNode {
             
             let majority = (self.config.cluster_nodes.len() / 2) + 1;
             
-            log::debug!(
-                "Node {} checking commit for index {}: {} replicated out of {} nodes (need {})",
+            println!("Node {} checking commit for index {}: {} replicated out of {} nodes (need {})",
                 self.config.node_id, index, replicated_count, self.config.cluster_nodes.len(), majority
             );
             
@@ -801,29 +809,29 @@ impl RaftNode {
                     None
                 };
                 
+                println!("Entry {} has term {:?}, current_term={}", index, entry_term, current_term);
+                
                 if let Some(term) = entry_term {
                     if term == current_term {
                         self.commit_index = index;
-                        log::info!(
-                            "Node {} advanced commit_index to {} (replicated on {} nodes)",
+                        println!("Node {} advanced commit_index to {} (replicated on {} nodes)",
                             self.config.node_id, index, replicated_count
                         );
                         
                         // Apply newly committed entries
                         self.apply_committed_entries()?;
                     } else {
-                        log::debug!(
-                            "Node {} cannot commit index {} from term {} (current term {})",
+                        println!("Node {} cannot commit index {} from term {} (current term {})",
                             self.config.node_id, index, term, current_term
                         );
                     }
                 } else {
-                    log::warn!(
-                        "Node {} cannot find entry at index {} for commit check",
+                    println!("Node {} cannot find entry at index {} for commit check",
                         self.config.node_id, index
                     );
                 }
             } else {
+                println!("Not enough replicas for index {}: {} < {}", index, replicated_count, majority);
                 // If this index doesn't have majority, later indices won't either
                 break;
             }
@@ -1508,7 +1516,7 @@ mod tests {
         
         // Add some entries to leader's log
         let entries = vec![
-            LogEntry::new(1, 1, b"entry1".to_vec()),
+            LogEntry::new(2, 1, b"entry1".to_vec()),
             LogEntry::new(2, 2, b"entry2".to_vec()),
         ];
         log_storage.append_entries(entries).unwrap();
@@ -1516,13 +1524,16 @@ mod tests {
         let transport = Box::new(MockTransport::new(0));
         let mut node = RaftNode::with_dependencies(config, state_storage, Box::new(log_storage), transport).unwrap();
         
+        // Set the leader's term to 2 to match the log entries
+        node.current_term = 2;
+        
         // Become leader
         node.transition_to(NodeState::Leader).unwrap();
         assert!(node.is_leader());
         
         // Test successful AppendEntries response
         // The response indicates the follower's last_log_index is 2
-        let success_response = AppendEntriesResponse::new(1, true, 1, 2);
+        let success_response = AppendEntriesResponse::new(2, true, 1, 2);
         node.handle_append_entries_response(success_response, 1).unwrap();
         
         // Should update next_index and match_index for follower
@@ -1531,12 +1542,12 @@ mod tests {
         assert_eq!(node.match_index.get(&1), Some(&2)); // follower's last_log_index
         
         // Test failed AppendEntries response
-        let fail_response = AppendEntriesResponse::new(1, false, 2, 1);
+        let fail_response = AppendEntriesResponse::new(2, false, 2, 1);
         node.handle_append_entries_response(fail_response, 2).unwrap();
         
         // Should decrement next_index for follower
         let expected_next = node.next_index.get(&2).copied().unwrap_or(1);
-        assert!(expected_next < 3); // Should be decremented
+        assert!(expected_next < 3); // Should be decremented from initial value of 3
     }
 
     #[test]
@@ -1586,7 +1597,7 @@ mod tests {
         // Add entries from current term
         let entries = vec![
             LogEntry::new(1, 1, b"entry1".to_vec()),
-            LogEntry::new(2, 1, b"entry2".to_vec()), // Same term as leader
+            LogEntry::new(1, 2, b"entry2".to_vec()), // Same term as leader
         ];
         log_storage.append_entries(entries).unwrap();
         
@@ -1602,10 +1613,14 @@ mod tests {
         node.match_index.insert(2, 0); // Follower 2 doesn't have entry 1 yet
         
         // Try to advance commit index
+        println!("Before advance_commit_index: commit_index={}, match_index={:?}, current_term={}", 
+                 node.commit_index, node.match_index, node.current_term);
         node.advance_commit_index().unwrap();
+        println!("After advance_commit_index: commit_index={}, last_applied={}", 
+                 node.commit_index, node.last_applied);
         
         // Leader + follower 1 = 2 nodes, which is majority for 3 nodes
-        //assert_eq!(node.commit_index, 1);
+        assert_eq!(node.commit_index, 1);
         assert_eq!(node.last_applied, 1);
         
         // Now simulate that follower 2 also replicates entry 1
@@ -1674,7 +1689,7 @@ mod tests {
         
         // Send AppendEntries with conflicting entry at index 2
         let new_entries = vec![
-            LogEntry::new(2, 3, b"new_entry2".to_vec()), // Different term, should cause conflict
+            LogEntry::new(3, 2, b"new_entry2".to_vec()), // Different term, should cause conflict
             LogEntry::new(3, 3, b"new_entry3".to_vec()),
         ];
         
