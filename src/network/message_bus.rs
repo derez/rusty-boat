@@ -32,10 +32,18 @@ impl MessageBus {
     
     /// Publish an event to all subscribers
     pub fn publish(&self, event: Event) -> Result<()> {
+        log::debug!("Publishing event to {} handlers", self.handler_count());
+        log::trace!("Event details: {:?}", event);
+        
         let mut handlers = self.handlers.lock().unwrap();
-        for handler in handlers.iter_mut() {
-            handler.handle_event(event.clone())?;
+        for (i, handler) in handlers.iter_mut().enumerate() {
+            if let Err(e) = handler.handle_event(event.clone()) {
+                log::error!("Handler {} failed to process event: {}", i, e);
+                return Err(e);
+            }
         }
+        
+        log::trace!("Event successfully processed by all handlers");
         Ok(())
     }
     

@@ -159,52 +159,92 @@ impl FileKVStorage {
 
 impl KVStorage for FileKVStorage {
     fn get(&self, key: &str) -> Option<Vec<u8>> {
-        self.data.get(key).cloned()
+        let value = self.data.get(key).cloned();
+        match &value {
+            Some(v) => log::debug!("File KV storage: retrieved key '{}' with {} bytes", key, v.len()),
+            None => log::trace!("File KV storage: key '{}' not found", key),
+        }
+        value
     }
     
     fn put(&mut self, key: String, value: Vec<u8>) {
+        log::info!("File KV storage: storing key '{}' with {} bytes (file: {:?})", 
+                  key, value.len(), self.file_path);
+        
         // Write to file first
-        if let Err(_) = self.write_entry_to_file(&key, &value) {
-            // Handle error - for now just continue
-            // In production, this should be handled properly
+        match self.write_entry_to_file(&key, &value) {
+            Ok(()) => {
+                log::debug!("File KV storage: successfully wrote key '{}' to file", key);
+                // Then update in-memory cache
+                self.data.insert(key.clone(), value);
+                log::trace!("File KV storage: updated in-memory cache for key '{}'", key);
+            }
+            Err(e) => {
+                log::error!("File KV storage: failed to write key '{}' to file {:?}: {}", 
+                           key, self.file_path, e);
+                // Still update cache for now - in production this should be handled properly
+                self.data.insert(key, value);
+            }
         }
-        // Then update in-memory cache
-        self.data.insert(key, value);
     }
     
     fn delete(&mut self, key: &str) -> bool {
         if self.data.contains_key(key) {
+            log::info!("File KV storage: deleting key '{}' (file: {:?})", key, self.file_path);
+            
             // Write deletion to file first
-            if let Err(_) = self.write_deletion_to_file(key) {
-                // Handle error - for now just continue
+            match self.write_deletion_to_file(key) {
+                Ok(()) => {
+                    log::debug!("File KV storage: successfully wrote deletion for key '{}' to file", key);
+                }
+                Err(e) => {
+                    log::error!("File KV storage: failed to write deletion for key '{}' to file: {}", key, e);
+                }
             }
+            
             // Then remove from in-memory cache
-            self.data.remove(key).is_some()
+            let removed = self.data.remove(key).is_some();
+            log::debug!("File KV storage: removed key '{}' from in-memory cache", key);
+            removed
         } else {
+            log::trace!("File KV storage: attempted to delete non-existent key '{}'", key);
             false
         }
     }
     
     fn keys(&self) -> Vec<String> {
-        self.data.keys().cloned().collect()
+        let keys = self.data.keys().cloned().collect::<Vec<_>>();
+        log::trace!("File KV storage: retrieved {} keys", keys.len());
+        keys
     }
     
     fn contains_key(&self, key: &str) -> bool {
-        self.data.contains_key(key)
+        let exists = self.data.contains_key(key);
+        log::trace!("File KV storage: key '{}' exists: {}", key, exists);
+        exists
     }
     
     fn len(&self) -> usize {
-        self.data.len()
+        let count = self.data.len();
+        log::trace!("File KV storage: contains {} key-value pairs", count);
+        count
     }
     
     fn is_empty(&self) -> bool {
-        self.data.is_empty()
+        let empty = self.data.is_empty();
+        log::trace!("File KV storage: is empty: {}", empty);
+        empty
     }
     
     fn clear(&mut self) {
+        let count = self.data.len();
+        log::warn!("File KV storage: clearing all {} key-value pairs (file: {:?})", 
+                  count, self.file_path);
+        
         // For file storage, we'd need to truncate the file
         // For now, just clear the in-memory cache
         self.data.clear();
+        log::info!("File KV storage: cleared in-memory cache");
     }
 }
 
@@ -231,35 +271,61 @@ impl Default for InMemoryKVStorage {
 
 impl KVStorage for InMemoryKVStorage {
     fn get(&self, key: &str) -> Option<Vec<u8>> {
-        self.data.get(key).cloned()
+        let value = self.data.get(key).cloned();
+        match &value {
+            Some(v) => log::debug!("In-memory KV storage: retrieved key '{}' with {} bytes", key, v.len()),
+            None => log::trace!("In-memory KV storage: key '{}' not found", key),
+        }
+        value
     }
     
     fn put(&mut self, key: String, value: Vec<u8>) {
-        self.data.insert(key, value);
+        log::info!("In-memory KV storage: storing key '{}' with {} bytes", key, value.len());
+        self.data.insert(key.clone(), value);
+        log::trace!("In-memory KV storage: successfully stored key '{}'", key);
     }
     
     fn delete(&mut self, key: &str) -> bool {
-        self.data.remove(key).is_some()
+        let removed = self.data.remove(key).is_some();
+        
+        if removed {
+            log::info!("In-memory KV storage: deleted key '{}'", key);
+        } else {
+            log::trace!("In-memory KV storage: attempted to delete non-existent key '{}'", key);
+        }
+        
+        removed
     }
     
     fn keys(&self) -> Vec<String> {
-        self.data.keys().cloned().collect()
+        let keys = self.data.keys().cloned().collect::<Vec<_>>();
+        log::trace!("In-memory KV storage: retrieved {} keys", keys.len());
+        keys
     }
     
     fn contains_key(&self, key: &str) -> bool {
-        self.data.contains_key(key)
+        let exists = self.data.contains_key(key);
+        log::trace!("In-memory KV storage: key '{}' exists: {}", key, exists);
+        exists
     }
     
     fn len(&self) -> usize {
-        self.data.len()
+        let count = self.data.len();
+        log::trace!("In-memory KV storage: contains {} key-value pairs", count);
+        count
     }
     
     fn is_empty(&self) -> bool {
-        self.data.is_empty()
+        let empty = self.data.is_empty();
+        log::trace!("In-memory KV storage: is empty: {}", empty);
+        empty
     }
     
     fn clear(&mut self) {
+        let count = self.data.len();
+        log::warn!("In-memory KV storage: clearing all {} key-value pairs", count);
         self.data.clear();
+        log::info!("In-memory KV storage: cleared all data");
     }
 }
 

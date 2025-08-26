@@ -41,20 +41,26 @@ impl KVStore for InMemoryKVStore {
         // Deserialize the operation from the log entry data
         let operation = KVOperation::from_bytes(&entry.data)?;
         
+        log::debug!("Applying KV operation from log entry {}: {:?}", entry.index, operation);
+        
         let mut storage = self.storage.lock().unwrap();
         
         match operation {
-            KVOperation::Get { key } => {
-                let value = storage.get(&key);
-                Ok(KVResponse::Get { key, value })
+            KVOperation::Get { ref key } => {
+                let value = storage.get(key);
+                log::trace!("GET operation for key '{}': {:?}", key, value.is_some());
+                Ok(KVResponse::Get { key: key.clone(), value })
             }
-            KVOperation::Put { key, value } => {
-                storage.put(key.clone(), value);
-                Ok(KVResponse::Put { key })
+            KVOperation::Put { ref key, ref value } => {
+                storage.put(key.clone(), value.clone());
+                log::info!("PUT operation: key='{}', value_len={}", key, value.len());
+                Ok(KVResponse::Put { key: key.clone() })
             }
-            KVOperation::Delete { key } => {
-                storage.delete(&key);
-                Ok(KVResponse::Delete { key })
+            KVOperation::Delete { ref key } => {
+                let existed = storage.contains_key(key);
+                storage.delete(key);
+                log::info!("DELETE operation: key='{}', existed={}", key, existed);
+                Ok(KVResponse::Delete { key: key.clone() })
             }
         }
     }

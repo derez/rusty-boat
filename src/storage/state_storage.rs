@@ -135,29 +135,84 @@ impl FileStateStorage {
 
 impl StateStorage for FileStateStorage {
     fn save_current_term(&mut self, term: Term) -> Result<()> {
-        self.state.current_term = term;
-        self.save_to_file()
+        let old_term = self.state.current_term;
+        if old_term != term {
+            log::info!("Updating current term from {} to {} (file: {:?})", old_term, term, self.file_path);
+            self.state.current_term = term;
+            match self.save_to_file() {
+                Ok(()) => {
+                    log::debug!("Successfully saved current term {} to persistent storage", term);
+                    Ok(())
+                }
+                Err(e) => {
+                    log::error!("Failed to save current term {} to file {:?}: {}", term, self.file_path, e);
+                    Err(e)
+                }
+            }
+        } else {
+            log::trace!("Current term {} unchanged, skipping save", term);
+            Ok(())
+        }
     }
     
     fn get_current_term(&self) -> Term {
+        log::trace!("Retrieved current term: {}", self.state.current_term);
         self.state.current_term
     }
     
     fn save_voted_for(&mut self, candidate: Option<NodeId>) -> Result<()> {
-        self.state.voted_for = candidate;
-        self.save_to_file()
+        let old_vote = self.state.voted_for;
+        if old_vote != candidate {
+            match candidate {
+                Some(node_id) => log::info!("Saving vote for candidate {} in term {} (was: {:?})", 
+                                           node_id, self.state.current_term, old_vote),
+                None => log::info!("Clearing vote in term {} (was: {:?})", 
+                                 self.state.current_term, old_vote),
+            }
+            self.state.voted_for = candidate;
+            match self.save_to_file() {
+                Ok(()) => {
+                    log::debug!("Successfully saved vote {:?} to persistent storage", candidate);
+                    Ok(())
+                }
+                Err(e) => {
+                    log::error!("Failed to save vote {:?} to file {:?}: {}", candidate, self.file_path, e);
+                    Err(e)
+                }
+            }
+        } else {
+            log::trace!("Vote {:?} unchanged, skipping save", candidate);
+            Ok(())
+        }
     }
     
     fn get_voted_for(&self) -> Option<NodeId> {
+        log::trace!("Retrieved voted_for: {:?}", self.state.voted_for);
         self.state.voted_for
     }
     
     fn save_state(&mut self, state: &PersistentState) -> Result<()> {
+        log::info!("Saving complete persistent state: term={}, voted_for={:?}", 
+                  state.current_term, state.voted_for);
+        let old_state = self.state.clone();
         self.state = state.clone();
-        self.save_to_file()
+        match self.save_to_file() {
+            Ok(()) => {
+                log::debug!("Successfully saved complete state to persistent storage");
+                Ok(())
+            }
+            Err(e) => {
+                log::error!("Failed to save complete state to file {:?}: {}", self.file_path, e);
+                // Restore old state on failure
+                self.state = old_state;
+                Err(e)
+            }
+        }
     }
     
     fn load_state(&self) -> Result<PersistentState> {
+        log::debug!("Loading persistent state: term={}, voted_for={:?}", 
+                   self.state.current_term, self.state.voted_for);
         Ok(self.state.clone())
     }
 }
@@ -190,29 +245,48 @@ impl Default for InMemoryStateStorage {
 
 impl StateStorage for InMemoryStateStorage {
     fn save_current_term(&mut self, term: Term) -> Result<()> {
-        self.state.current_term = term;
+        let old_term = self.state.current_term;
+        if old_term != term {
+            log::debug!("In-memory storage: updating current term from {} to {}", old_term, term);
+            self.state.current_term = term;
+        } else {
+            log::trace!("In-memory storage: current term {} unchanged", term);
+        }
         Ok(())
     }
     
     fn get_current_term(&self) -> Term {
+        log::trace!("In-memory storage: retrieved current term: {}", self.state.current_term);
         self.state.current_term
     }
     
     fn save_voted_for(&mut self, candidate: Option<NodeId>) -> Result<()> {
-        self.state.voted_for = candidate;
+        let old_vote = self.state.voted_for;
+        if old_vote != candidate {
+            log::debug!("In-memory storage: updating vote from {:?} to {:?} in term {}", 
+                       old_vote, candidate, self.state.current_term);
+            self.state.voted_for = candidate;
+        } else {
+            log::trace!("In-memory storage: vote {:?} unchanged", candidate);
+        }
         Ok(())
     }
     
     fn get_voted_for(&self) -> Option<NodeId> {
+        log::trace!("In-memory storage: retrieved voted_for: {:?}", self.state.voted_for);
         self.state.voted_for
     }
     
     fn save_state(&mut self, state: &PersistentState) -> Result<()> {
+        log::debug!("In-memory storage: saving complete state: term={}, voted_for={:?}", 
+                   state.current_term, state.voted_for);
         self.state = state.clone();
         Ok(())
     }
     
     fn load_state(&self) -> Result<PersistentState> {
+        log::debug!("In-memory storage: loading state: term={}, voted_for={:?}", 
+                   self.state.current_term, self.state.voted_for);
         Ok(self.state.clone())
     }
 }

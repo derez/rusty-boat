@@ -80,9 +80,15 @@ pub type Term = u64;
 pub type LogIndex = u64;
 
 fn main() {
-    println!("kvapp-c: Raft-based distributed key-value store");
-    println!("Phase 1 implementation complete - all core infrastructure ready");
-    println!("Ready for Phase 2: Consensus Implementation");
+    // Initialize logging
+    env_logger::init();
+    
+    log::info!("Starting kvapp-c: Raft-based distributed key-value store");
+    log::info!("Phase 1 implementation complete - all core infrastructure ready");
+    log::info!("Ready for Phase 2: Consensus Implementation");
+    
+    // Application would continue with actual Raft node initialization here
+    log::info!("Application startup complete");
 }
 
 #[cfg(test)]

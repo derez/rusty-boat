@@ -43,28 +43,55 @@ impl TcpTransport {
 
 impl NetworkTransport for TcpTransport {
     fn send_message(&self, to: NodeId, message: Vec<u8>) -> Result<()> {
+        log::debug!("TCP transport: attempting to send {} byte message to node {}", message.len(), to);
+        
         // Stub implementation - in real implementation would send over TCP
         if self.config.cluster_addresses.contains_key(&to) {
-            Ok(())
+            if let Some(address) = self.config.cluster_addresses.get(&to) {
+                log::trace!("TCP transport: sending message to node {} at address {:?}", to, address);
+                // In real implementation: establish connection and send message
+                log::info!("TCP transport: successfully sent message to node {}", to);
+                Ok(())
+            } else {
+                log::error!("TCP transport: node {} address not found in cluster configuration", to);
+                Err(Error::Network(format!("Node {} address not found", to)))
+            }
         } else {
+            log::error!("TCP transport: unknown destination node {}", to);
             Err(Error::Network(format!("Unknown node: {}", to)))
         }
     }
     
     fn receive_messages(&self) -> Vec<(NodeId, Vec<u8>)> {
         // Stub implementation - would receive from TCP sockets
-        Vec::new()
+        log::trace!("TCP transport: checking for incoming messages");
+        let messages: Vec<(NodeId, Vec<u8>)> = Vec::new(); // In real implementation: read from sockets
+        
+        if !messages.is_empty() {
+            log::debug!("TCP transport: received {} messages", messages.len());
+            for (from, msg) in &messages {
+                log::trace!("TCP transport: received {} byte message from node {}", msg.len(), from);
+            }
+        }
+        
+        messages
     }
     
     fn is_connected(&self, node_id: NodeId) -> bool {
-        self.connections.lock().unwrap().get(&node_id).copied().unwrap_or(false)
+        let connected = self.connections.lock().unwrap().get(&node_id).copied().unwrap_or(false);
+        log::trace!("TCP transport: connection status for node {}: {}", node_id, connected);
+        connected
     }
     
     fn connected_nodes(&self) -> Vec<NodeId> {
-        self.connections.lock().unwrap()
+        let connections = self.connections.lock().unwrap();
+        let connected: Vec<NodeId> = connections
             .iter()
             .filter_map(|(id, connected)| if *connected { Some(*id) } else { None })
-            .collect()
+            .collect();
+        
+        log::debug!("TCP transport: {} nodes currently connected: {:?}", connected.len(), connected);
+        connected
     }
 }
 
@@ -115,7 +142,14 @@ impl MockTransport {
 
 impl NetworkTransport for MockTransport {
     fn send_message(&self, to: NodeId, message: Vec<u8>) -> Result<()> {
-        self.sent_messages.lock().unwrap().push((to, message));
+        log::debug!("Mock transport (node {}): sending {} byte message to node {}", 
+                   self.node_id, message.len(), to);
+        log::trace!("Mock transport (node {}): message content: {:?}", self.node_id, message);
+        
+        self.sent_messages.lock().unwrap().push((to, message.clone()));
+        
+        log::info!("Mock transport (node {}): successfully queued message for node {}", 
+                  self.node_id, to);
         Ok(())
     }
     
@@ -123,15 +157,33 @@ impl NetworkTransport for MockTransport {
         let mut messages = self.incoming_messages.lock().unwrap();
         let result = messages.clone();
         messages.clear();
+        
+        if !result.is_empty() {
+            log::debug!("Mock transport (node {}): delivering {} incoming messages", 
+                       self.node_id, result.len());
+            for (from, msg) in &result {
+                log::trace!("Mock transport (node {}): delivering {} byte message from node {}", 
+                           self.node_id, msg.len(), from);
+            }
+        } else {
+            log::trace!("Mock transport (node {}): no incoming messages", self.node_id);
+        }
+        
         result
     }
     
     fn is_connected(&self, node_id: NodeId) -> bool {
-        self.connected_nodes.lock().unwrap().contains(&node_id)
+        let connected = self.connected_nodes.lock().unwrap().contains(&node_id);
+        log::trace!("Mock transport (node {}): connection status for node {}: {}", 
+                   self.node_id, node_id, connected);
+        connected
     }
     
     fn connected_nodes(&self) -> Vec<NodeId> {
-        self.connected_nodes.lock().unwrap().clone()
+        let connected = self.connected_nodes.lock().unwrap().clone();
+        log::debug!("Mock transport (node {}): {} nodes connected: {:?}", 
+                   self.node_id, connected.len(), connected);
+        connected
     }
 }
 

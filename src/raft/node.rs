@@ -75,6 +75,12 @@ impl RaftNode {
     /// Transition to a new state
     pub fn transition_to(&mut self, new_state: NodeState) -> Result<()> {
         let old_state = self.state.clone();
+        
+        log::info!(
+            "Node {} transitioning from {:?} to {:?} in term {}",
+            self.config.node_id, old_state, new_state, self.current_term
+        );
+        
         self.state = new_state;
         
         // Perform state-specific initialization
@@ -82,19 +88,29 @@ impl RaftNode {
             NodeState::Follower => {
                 // Reset election timer, clear leader if transitioning from leader
                 if matches!(old_state, NodeState::Leader) {
+                    log::info!("Node {} stepping down as leader", self.config.node_id);
                     self.current_leader = None;
                 }
+                log::debug!("Node {} now following in term {}", self.config.node_id, self.current_term);
             }
             NodeState::Candidate => {
                 // Start election process
                 self.current_term += 1;
                 self.voted_for = Some(self.config.node_id);
                 self.current_leader = None;
+                log::info!(
+                    "Node {} starting election for term {} (voted for self)",
+                    self.config.node_id, self.current_term
+                );
             }
             NodeState::Leader => {
                 // Become leader
                 self.current_leader = Some(self.config.node_id);
                 self.voted_for = None;
+                log::info!(
+                    "Node {} became leader for term {}",
+                    self.config.node_id, self.current_term
+                );
             }
         }
         
