@@ -54,29 +54,38 @@ impl KVClient {
     
     /// Get a value by key
     pub fn get(&self, key: String) -> Result<Option<Vec<u8>>> {
-        // Stub implementation - in real implementation would send request to Raft node
-        let _operation = KVOperation::Get { key };
+        let operation = KVOperation::Get { key };
+        let response = self.send_request(operation)?;
         
-        // For now, return None (key not found)
-        Ok(None)
+        match response {
+            KVResponse::Get { value, .. } => Ok(value),
+            KVResponse::Error { message } => Err(Error::KeyValue(message)),
+            _ => Err(Error::KeyValue("Unexpected response type".to_string())),
+        }
     }
     
     /// Put a key-value pair
     pub fn put(&self, key: String, value: Vec<u8>) -> Result<()> {
-        // Stub implementation - in real implementation would send request to Raft node
-        let _operation = KVOperation::Put { key, value };
+        let operation = KVOperation::Put { key, value };
+        let response = self.send_request(operation)?;
         
-        // For now, just return success
-        Ok(())
+        match response {
+            KVResponse::Put { .. } => Ok(()),
+            KVResponse::Error { message } => Err(Error::KeyValue(message)),
+            _ => Err(Error::KeyValue("Unexpected response type".to_string())),
+        }
     }
     
     /// Delete a key
     pub fn delete(&self, key: String) -> Result<bool> {
-        // Stub implementation - in real implementation would send request to Raft node
-        let _operation = KVOperation::Delete { key };
+        let operation = KVOperation::Delete { key };
+        let response = self.send_request(operation)?;
         
-        // For now, return false (key not found)
-        Ok(false)
+        match response {
+            KVResponse::Delete { .. } => Ok(false), // Stub implementation: simulate key not found
+            KVResponse::Error { message } => Err(Error::KeyValue(message)),
+            _ => Err(Error::KeyValue("Unexpected response type".to_string())),
+        }
     }
     
     /// Get the node ID this client is connected to
@@ -99,6 +108,34 @@ impl KVClient {
     /// Update the client configuration
     pub fn set_config(&mut self, config: ClientConfig) {
         self.config = config;
+    }
+    
+    /// Send a request to the server and get response
+    fn send_request(&self, operation: KVOperation) -> Result<KVResponse> {
+        // For now, implement a simple stub that simulates server communication
+        // In a full implementation, this would:
+        // 1. Serialize the operation
+        // 2. Send it over TCP to the server
+        // 3. Wait for response
+        // 4. Deserialize and return the response
+        
+        log::debug!("Sending KV request: {:?}", operation);
+        
+        // Simulate different responses based on operation type
+        match operation {
+            KVOperation::Get { key } => {
+                log::debug!("Processing GET request for key: {}", key);
+                Ok(KVResponse::Get { key, value: None })
+            }
+            KVOperation::Put { key, value: _ } => {
+                log::debug!("Processing PUT request for key: {}", key);
+                Ok(KVResponse::Put { key })
+            }
+            KVOperation::Delete { key } => {
+                log::debug!("Processing DELETE request for key: {}", key);
+                Ok(KVResponse::Delete { key })
+            }
+        }
     }
 }
 

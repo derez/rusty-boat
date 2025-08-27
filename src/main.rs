@@ -289,7 +289,9 @@ fn run_server_loop(
         }
         
         // Process any client requests
-        // TODO: Implement client request processing
+        if let Err(e) = process_client_requests(raft_node, kv_store) {
+            log::error!("Error processing client requests: {}", e);
+        }
         
         // Small sleep to prevent busy waiting
         thread::sleep(Duration::from_millis(10));
@@ -500,6 +502,36 @@ fn process_network_messages(
                 log::error!("Failed to deserialize message from node {}: {}", from_node_id, e);
             }
         }
+    }
+    
+    Ok(())
+}
+
+/// Process client requests and apply them to the Raft log
+fn process_client_requests(
+    raft_node: &mut raft::RaftNode,
+    kv_store: &mut kv::InMemoryKVStore,
+) -> Result<()> {
+    // For now, this is a stub implementation
+    // In a full implementation, this would:
+    // 1. Listen for client connections on a separate port
+    // 2. Receive client requests (KV operations)
+    // 3. If this node is the leader, propose the operation to the Raft log
+    // 4. If this node is not the leader, redirect the client to the leader
+    // 5. Once the operation is committed, apply it to the KV store
+    // 6. Send response back to the client
+    
+    // For now, just log that we're processing client requests
+    if raft_node.is_leader() {
+        log::trace!("Leader {} ready to process client requests", raft_node.node_id());
+        
+        // TODO: Implement actual client request processing
+        // This would involve:
+        // - Listening for client connections
+        // - Parsing client requests (KV operations)
+        // - Proposing operations to the Raft log
+        // - Waiting for commit and applying to KV store
+        // - Sending responses back to clients
     }
     
     Ok(())
