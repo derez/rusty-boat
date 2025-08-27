@@ -175,11 +175,14 @@ fn run_server(args: &[String]) -> Result<()> {
         }
     }
     
-    let transport = Box::new(network::TcpTransport::new(
+    let mut transport = network::TcpTransport::new(
         network_config, 
         config.node_id, 
         &config.bind_address
-    )?);
+    )?;
+    
+    // Start the TCP listener for incoming connections
+    transport.start_listener()?;
     
     // Create Raft configuration
     let raft_config = raft::RaftConfig {
@@ -194,7 +197,7 @@ fn run_server(args: &[String]) -> Result<()> {
         raft_config,
         state_storage,
         log_storage,
-        transport,
+        Box::new(transport),
     )?;
     
     // Initialize KV store
@@ -205,6 +208,10 @@ fn run_server(args: &[String]) -> Result<()> {
     
     // Initialize message bus
     let message_bus = network::MessageBus::new();
+    
+    // Start TCP listener for incoming connections
+    // Note: We need to start the listener before creating the RaftNode
+    // For now, we'll handle this in the transport creation
     
     log::info!("Server initialized successfully");
     
@@ -258,7 +265,9 @@ fn run_server_loop(
         }
         
         // Process any pending network messages
-        // TODO: Implement network message processing
+        if let Err(e) = process_network_messages(raft_node, kv_store) {
+            log::error!("Error processing network messages: {}", e);
+        }
         
         // Process any client requests
         // TODO: Implement client request processing
@@ -381,6 +390,80 @@ fn process_client_command(client: &mut kv::KVClient, input: &str) -> Result<()> 
         }
         _ => {
             println!("Unknown command: {}. Type 'help' for available commands.", parts[0]);
+        }
+    }
+    
+    Ok(())
+}
+
+/// Process incoming network messages and forward them to the Raft node
+fn process_network_messages(
+    raft_node: &mut raft::RaftNode,
+    _kv_store: &mut kv::InMemoryKVStore,
+) -> Result<()> {
+    // Get the transport from the Raft node to check for incoming messages
+    let raw_messages = raft_node.get_transport().receive_messages();
+    
+    if !raw_messages.is_empty() {
+        log::debug!("Processing {} incoming network messages", raw_messages.len());
+    }
+    
+    // Process each incoming message
+    for (from_node_id, message_bytes) in raw_messages {
+        log::debug!("Processing message from node {} ({} bytes)", from_node_id, message_bytes.len());
+        
+        // Deserialize the message
+        match raft::RaftMessage::from_bytes(&message_bytes) {
+            Ok(raft_message) => {
+                log::debug!("Deserialized Raft message: {:?}", raft_message);
+                
+                // Forward the message to the Raft node for processing
+                match raft_message {
+                    raft::RaftMessage::RequestVote(request) => {
+                        match raft_node.handle_vote_request(request) {
+                            Ok(response) => {
+                                // Send response back to the requesting node
+                                let response_message = raft::RaftMessage::RequestVoteResponse(response);
+                                let response_bytes = response_message.to_bytes();
+                                if let Err(e) = raft_node.get_transport().send_message(from_node_id, response_bytes) {
+                                    log::error!("Error sending RequestVoteResponse to node {}: {}", from_node_id, e);
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("Error handling RequestVote from node {}: {}", from_node_id, e);
+                            }
+                        }
+                    }
+                    raft::RaftMessage::RequestVoteResponse(response) => {
+                        if let Err(e) = raft_node.handle_vote_response(response) {
+                            log::error!("Error handling RequestVoteResponse from node {}: {}", from_node_id, e);
+                        }
+                    }
+                    raft::RaftMessage::AppendEntries(request) => {
+                        match raft_node.handle_append_entries(request) {
+                            Ok(response) => {
+                                // Send response back to the requesting node
+                                let response_message = raft::RaftMessage::AppendEntriesResponse(response);
+                                let response_bytes = response_message.to_bytes();
+                                if let Err(e) = raft_node.get_transport().send_message(from_node_id, response_bytes) {
+                                    log::error!("Error sending AppendEntriesResponse to node {}: {}", from_node_id, e);
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("Error handling AppendEntries from node {}: {}", from_node_id, e);
+                            }
+                        }
+                    }
+                    raft::RaftMessage::AppendEntriesResponse(response) => {
+                        if let Err(e) = raft_node.handle_append_entries_response(response, from_node_id) {
+                            log::error!("Error handling AppendEntriesResponse from node {}: {}", from_node_id, e);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                log::error!("Failed to deserialize message from node {}: {}", from_node_id, e);
+            }
         }
     }
     

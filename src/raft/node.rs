@@ -849,6 +849,11 @@ impl RaftNode {
         self.config = config;
     }
     
+    /// Get access to the network transport
+    pub fn get_transport(&self) -> &dyn NetworkTransport {
+        self.transport.as_ref().expect("Transport not initialized").as_ref()
+    }
+    
     // ========== SAFETY MECHANISMS ==========
     
     /// Safety Mechanism 1: Election Safety
