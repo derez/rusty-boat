@@ -62,6 +62,11 @@ impl KVStore for InMemoryKVStore {
                 log::info!("DELETE operation: key='{}', existed={}", key, existed);
                 Ok(KVResponse::Delete { key: key.clone() })
             }
+            KVOperation::List => {
+                let keys = storage.keys();
+                log::trace!("LIST operation: found {} keys", keys.len());
+                Ok(KVResponse::List { keys })
+            }
         }
     }
     
@@ -117,6 +122,26 @@ impl KVStore for InMemoryKVStore {
     fn get(&self, key: &str) -> Option<Vec<u8>> {
         let storage = self.storage.lock().unwrap();
         storage.get(key)
+    }
+}
+
+impl InMemoryKVStore {
+    /// Put a key-value pair directly (for server-side operations)
+    pub fn put(&mut self, key: String, value: Vec<u8>) {
+        let mut storage = self.storage.lock().unwrap();
+        storage.put(key, value);
+    }
+    
+    /// Delete a key directly (for server-side operations)
+    pub fn delete(&mut self, key: &str) -> bool {
+        let mut storage = self.storage.lock().unwrap();
+        storage.delete(key)
+    }
+    
+    /// List all keys in the store
+    pub fn list_keys(&self) -> Vec<String> {
+        let storage = self.storage.lock().unwrap();
+        storage.keys()
     }
 }
 

@@ -12,6 +12,8 @@ pub struct KVClient {
     node_id: NodeId,
     /// Client configuration
     config: ClientConfig,
+    /// Cluster addresses for server connections
+    cluster_addresses: Vec<String>,
 }
 
 /// Configuration for the KV client
@@ -36,19 +38,58 @@ impl Default for ClientConfig {
 }
 
 impl KVClient {
-    /// Create a new KV client
-    pub fn new(node_id: NodeId) -> Self {
+    /// Create a new KV client with cluster addresses
+    /// This is the primary constructor - cluster addresses must be provided
+    pub fn with_cluster_addresses(node_id: NodeId, cluster_addresses: Vec<String>) -> Self {
+        // Convert server addresses to client addresses (add 1000 to port for client listener)
+        let client_addresses = cluster_addresses.iter()
+            .map(|addr| {
+                if let Some(colon_pos) = addr.rfind(':') {
+                    let host = &addr[..colon_pos];
+                    if let Ok(port) = addr[colon_pos + 1..].parse::<u16>() {
+                        format!("{}:{}", host, port + 1000)
+                    } else {
+                        // If port parsing fails, this is an invalid address
+                        addr.clone() // Return as-is, will fail during connection
+                    }
+                } else {
+                    // If no port specified, this is an invalid address
+                    addr.clone() // Return as-is, will fail during connection
+                }
+            })
+            .collect();
+            
         Self {
             node_id,
             config: ClientConfig::default(),
+            cluster_addresses: client_addresses,
         }
     }
     
-    /// Create a new KV client with custom configuration
-    pub fn with_config(node_id: NodeId, config: ClientConfig) -> Self {
+    /// Create a new KV client with custom configuration and cluster addresses
+    pub fn with_config_and_addresses(node_id: NodeId, config: ClientConfig, cluster_addresses: Vec<String>) -> Self {
+        // Convert server addresses to client addresses (add 1000 to port for client listener)
+        let client_addresses = cluster_addresses.iter()
+            .map(|addr| {
+                if let Some(colon_pos) = addr.rfind(':') {
+                    let host = &addr[..colon_pos];
+                    if let Ok(port) = addr[colon_pos + 1..].parse::<u16>() {
+                        format!("{}:{}", host, port + 1000)
+                    } else {
+                        // If port parsing fails, this is an invalid address
+                        addr.clone() // Return as-is, will fail during connection
+                    }
+                } else {
+                    // If no port specified, this is an invalid address
+                    addr.clone() // Return as-is, will fail during connection
+                }
+            })
+            .collect();
+            
         Self {
             node_id,
             config,
+            cluster_addresses: client_addresses,
         }
     }
     
@@ -95,9 +136,14 @@ impl KVClient {
     
     /// List all keys
     pub fn list_keys(&self) -> Result<Vec<String>> {
-        // Stub implementation - in real implementation would send request to Raft node
-        // For now, return empty list
-        Ok(Vec::new())
+        let operation = KVOperation::List;
+        let response = self.send_request(operation)?;
+        
+        match response {
+            KVResponse::List { keys } => Ok(keys),
+            KVResponse::Error { message } => Err(Error::KeyValue(message)),
+            _ => Err(Error::KeyValue("Unexpected response type".to_string())),
+        }
     }
     
     /// Get the client configuration
@@ -112,29 +158,189 @@ impl KVClient {
     
     /// Send a request to the server and get response
     fn send_request(&self, operation: KVOperation) -> Result<KVResponse> {
-        // For now, implement a simple stub that simulates server communication
-        // In a full implementation, this would:
-        // 1. Serialize the operation
-        // 2. Send it over TCP to the server
-        // 3. Wait for response
-        // 4. Deserialize and return the response
+        use std::net::TcpStream;
+        use std::io::{Read, Write, BufReader, BufWriter};
+        use std::time::Duration;
         
         log::debug!("Sending KV request: {:?}", operation);
         
-        // Simulate different responses based on operation type
-        match operation {
-            KVOperation::Get { key } => {
-                log::debug!("Processing GET request for key: {}", key);
-                Ok(KVResponse::Get { key, value: None })
+        // Check if we have any cluster addresses
+        if self.cluster_addresses.is_empty() {
+            return Err(Error::Network("No cluster addresses configured".to_string()));
+        }
+        
+        // Try each server in the cluster until we find one that responds
+        // In a Raft cluster, only the leader can process client requests
+        let mut last_error = None;
+        
+        for (index, server_address) in self.cluster_addresses.iter().enumerate() {
+            log::info!("Client connecting to server at {} (this should be the leader)", server_address);
+            
+            match self.try_server_request(&operation, server_address) {
+                Ok(response) => {
+                    log::info!("Successfully connected to leader at {}", server_address);
+                    return Ok(response);
+                }
+                Err(e) => {
+                    log::warn!("Failed to connect to server at {}: {}", server_address, e);
+                    last_error = Some(e);
+                    
+                    // If this isn't the last server, try the next one
+                    if index < self.cluster_addresses.len() - 1 {
+                        log::debug!("Trying next server in cluster...");
+                        continue;
+                    }
+                }
             }
-            KVOperation::Put { key, value: _ } => {
-                log::debug!("Processing PUT request for key: {}", key);
+        }
+        
+        // If we get here, all servers failed
+        Err(last_error.unwrap_or_else(|| Error::Network("No servers available".to_string())))
+    }
+    
+    /// Try to send a request to a specific server
+    fn try_server_request(&self, operation: &KVOperation, server_address: &str) -> Result<KVResponse> {
+        use std::net::TcpStream;
+        use std::io::{Read, Write, BufReader, BufWriter};
+        use std::time::Duration;
+        
+        // Connect to server with timeout
+        let stream = TcpStream::connect_timeout(
+            &server_address.parse().map_err(|e| Error::Network(format!("Invalid server address: {}", e)))?,
+            Duration::from_secs(5)
+        ).map_err(|e| Error::Network(format!("Failed to connect to server: {}", e)))?;
+        
+        let mut writer = BufWriter::new(&stream);
+        let mut reader = BufReader::new(&stream);
+        
+        // Serialize the operation
+        let operation_bytes = operation.to_bytes();
+        
+        // Send framed message: 4 bytes length + operation data
+        let message_len = operation_bytes.len() as u32;
+        let mut framed_message = Vec::with_capacity(4 + operation_bytes.len());
+        framed_message.extend_from_slice(&message_len.to_be_bytes());
+        framed_message.extend_from_slice(&operation_bytes);
+        
+        // Send the request
+        writer.write_all(&framed_message)
+            .map_err(|e| Error::Network(format!("Failed to send request: {}", e)))?;
+        writer.flush()
+            .map_err(|e| Error::Network(format!("Failed to flush request: {}", e)))?;
+        
+        log::debug!("Sent {} byte request to server", operation_bytes.len());
+        
+        // Read response header (4 bytes for length)
+        let mut header = [0u8; 4];
+        reader.read_exact(&mut header)
+            .map_err(|e| Error::Network(format!("Failed to read response header: {}", e)))?;
+        
+        let response_len = u32::from_be_bytes(header) as usize;
+        
+        // Validate response length
+        if response_len > 1024 * 1024 { // 1MB limit
+            return Err(Error::Network("Response too large".to_string()));
+        }
+        
+        // Read response data
+        let mut response_data = vec![0u8; response_len];
+        reader.read_exact(&mut response_data)
+            .map_err(|e| Error::Network(format!("Failed to read response data: {}", e)))?;
+        
+        log::debug!("Received {} byte response from server", response_len);
+        
+        // Deserialize the response
+        self.deserialize_response(&response_data)
+    }
+    
+    /// Deserialize a response from bytes
+    fn deserialize_response(&self, bytes: &[u8]) -> Result<KVResponse> {
+        if bytes.is_empty() {
+            return Err(Error::Serialization("Empty response".to_string()));
+        }
+        
+        match bytes[0] {
+            0 => {
+                // Get response
+                if bytes.len() < 5 {
+                    return Err(Error::Serialization("Invalid Get response".to_string()));
+                }
+                let key_len = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
+                if bytes.len() < 5 + key_len + 1 {
+                    return Err(Error::Serialization("Invalid Get response length".to_string()));
+                }
+                let key = String::from_utf8(bytes[5..5 + key_len].to_vec())
+                    .map_err(|e| Error::Serialization(e.to_string()))?;
+                let has_value = bytes[5 + key_len] != 0;
+                let value = if has_value {
+                    Some(bytes[5 + key_len + 1..].to_vec())
+                } else {
+                    None
+                };
+                Ok(KVResponse::Get { key, value })
+            }
+            1 => {
+                // Put response
+                if bytes.len() < 5 {
+                    return Err(Error::Serialization("Invalid Put response".to_string()));
+                }
+                let key_len = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
+                if bytes.len() < 5 + key_len {
+                    return Err(Error::Serialization("Invalid Put response length".to_string()));
+                }
+                let key = String::from_utf8(bytes[5..5 + key_len].to_vec())
+                    .map_err(|e| Error::Serialization(e.to_string()))?;
                 Ok(KVResponse::Put { key })
             }
-            KVOperation::Delete { key } => {
-                log::debug!("Processing DELETE request for key: {}", key);
+            2 => {
+                // Delete response
+                if bytes.len() < 5 {
+                    return Err(Error::Serialization("Invalid Delete response".to_string()));
+                }
+                let key_len = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
+                if bytes.len() < 5 + key_len {
+                    return Err(Error::Serialization("Invalid Delete response length".to_string()));
+                }
+                let key = String::from_utf8(bytes[5..5 + key_len].to_vec())
+                    .map_err(|e| Error::Serialization(e.to_string()))?;
                 Ok(KVResponse::Delete { key })
             }
+            3 => {
+                // Error response
+                let message = String::from_utf8(bytes[1..].to_vec())
+                    .map_err(|e| Error::Serialization(e.to_string()))?;
+                Ok(KVResponse::Error { message })
+            }
+            4 => {
+                // List response
+                if bytes.len() < 5 {
+                    return Err(Error::Serialization("Invalid List response".to_string()));
+                }
+                let key_count = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
+                let mut keys = Vec::with_capacity(key_count);
+                let mut offset = 5;
+                
+                for _ in 0..key_count {
+                    if offset + 4 > bytes.len() {
+                        return Err(Error::Serialization("Invalid List response key length".to_string()));
+                    }
+                    let key_len = u32::from_be_bytes([
+                        bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]
+                    ]) as usize;
+                    offset += 4;
+                    
+                    if offset + key_len > bytes.len() {
+                        return Err(Error::Serialization("Invalid List response key data".to_string()));
+                    }
+                    let key = String::from_utf8(bytes[offset..offset + key_len].to_vec())
+                        .map_err(|e| Error::Serialization(e.to_string()))?;
+                    keys.push(key);
+                    offset += key_len;
+                }
+                
+                Ok(KVResponse::List { keys })
+            }
+            _ => Err(Error::Serialization("Unknown response type".to_string())),
         }
     }
 }
@@ -233,13 +439,17 @@ mod tests {
 
     #[test]
     fn test_kv_client_creation() {
-        let client = KVClient::new(1);
+        let cluster_addresses = vec!["127.0.0.1:8080".to_string()];
+        let client = KVClient::with_cluster_addresses(1, cluster_addresses);
         assert_eq!(client.node_id(), 1);
         
         let config = client.config();
         assert_eq!(config.request_timeout_ms, 5000);
         assert_eq!(config.max_retries, 3);
         assert_eq!(config.retry_delay_ms, 100);
+        
+        // Verify cluster addresses were converted correctly (8080 -> 9080)
+        assert_eq!(client.cluster_addresses, vec!["127.0.0.1:9080".to_string()]);
     }
 
     #[test]
@@ -250,28 +460,51 @@ mod tests {
             retry_delay_ms: 200,
         };
         
-        let client = KVClient::with_config(2, config.clone());
+        let cluster_addresses = vec!["127.0.0.1:8080".to_string()];
+        let client = KVClient::with_config_and_addresses(2, config.clone(), cluster_addresses);
         assert_eq!(client.node_id(), 2);
         assert_eq!(client.config().request_timeout_ms, 10000);
         assert_eq!(client.config().max_retries, 5);
         assert_eq!(client.config().retry_delay_ms, 200);
+        
+        // Verify cluster addresses were converted correctly (8080 -> 9080)
+        assert_eq!(client.cluster_addresses, vec!["127.0.0.1:9080".to_string()]);
     }
 
     #[test]
-    fn test_kv_client_operations() {
-        let client = KVClient::new(1);
+    fn test_kv_client_operations_no_addresses() {
+        let client = KVClient::with_cluster_addresses(1, vec![]);
         
-        // Test get operation (stub returns None)
-        let result = client.get("test_key".to_string()).unwrap();
-        assert_eq!(result, None);
+        // Test operations should fail with no cluster addresses
+        let result = client.get("test_key".to_string());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("No cluster addresses configured"));
         
-        // Test put operation (stub returns success)
         let result = client.put("test_key".to_string(), b"test_value".to_vec());
-        assert!(result.is_ok());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("No cluster addresses configured"));
         
-        // Test delete operation (stub returns false)
-        let result = client.delete("test_key".to_string()).unwrap();
-        assert_eq!(result, false);
+        let result = client.delete("test_key".to_string());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("No cluster addresses configured"));
+    }
+
+    #[test]
+    fn test_kv_client_address_conversion() {
+        // Test various address formats
+        let cluster_addresses = vec![
+            "127.0.0.1:8080".to_string(),
+            "localhost:8081".to_string(),
+            "192.168.1.1:8082".to_string(),
+        ];
+        let client = KVClient::with_cluster_addresses(1, cluster_addresses);
+        
+        let expected = vec![
+            "127.0.0.1:9080".to_string(),
+            "localhost:9081".to_string(),
+            "192.168.1.1:9082".to_string(),
+        ];
+        assert_eq!(client.cluster_addresses, expected);
     }
 
     #[test]

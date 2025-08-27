@@ -21,6 +21,8 @@ pub enum KVOperation {
     Put { key: String, value: Vec<u8> },
     /// Delete a key
     Delete { key: String },
+    /// List all keys
+    List,
 }
 
 impl KVOperation {
@@ -44,6 +46,9 @@ impl KVOperation {
                 let mut bytes = vec![2u8]; // Operation type: Delete
                 bytes.extend_from_slice(key.as_bytes());
                 bytes
+            }
+            KVOperation::List => {
+                vec![3u8] // Operation type: List
             }
         }
     }
@@ -81,6 +86,10 @@ impl KVOperation {
                     .map_err(|e| crate::Error::Serialization(e.to_string()))?;
                 Ok(KVOperation::Delete { key })
             }
+            3 => {
+                // List operation
+                Ok(KVOperation::List)
+            }
             _ => Err(crate::Error::Serialization("Unknown operation type".to_string())),
         }
     }
@@ -95,6 +104,8 @@ pub enum KVResponse {
     Put { key: String },
     /// Successful delete response
     Delete { key: String },
+    /// Successful list response
+    List { keys: Vec<String> },
     /// Error response
     Error { message: String },
 }

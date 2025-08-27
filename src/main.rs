@@ -244,8 +244,8 @@ fn run_client(args: &[String], verbose: bool) -> Result<()> {
     
     log::info!("Starting client, connecting to cluster: {:?}", config.cluster_addresses);
     
-    // Initialize KV client (using first node for now)
-    let client = kv::KVClient::new(0);
+    // Initialize KV client with cluster addresses
+    let client = kv::KVClient::with_cluster_addresses(0, config.cluster_addresses.clone());
     
     log::info!("Connected to kvapp-c cluster");
     println!("Connected to kvapp-c cluster");
@@ -512,29 +512,229 @@ fn process_client_requests(
     raft_node: &mut raft::RaftNode,
     kv_store: &mut kv::InMemoryKVStore,
 ) -> Result<()> {
-    // For now, this is a stub implementation
-    // In a full implementation, this would:
-    // 1. Listen for client connections on a separate port
-    // 2. Receive client requests (KV operations)
-    // 3. If this node is the leader, propose the operation to the Raft log
-    // 4. If this node is not the leader, redirect the client to the leader
-    // 5. Once the operation is committed, apply it to the KV store
-    // 6. Send response back to the client
+    use std::net::{TcpListener, TcpStream};
+    use std::io::{Read, Write, BufReader, BufWriter};
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::Duration;
     
-    // For now, just log that we're processing client requests
-    if raft_node.is_leader() {
-        log::trace!("Leader {} ready to process client requests", raft_node.node_id());
-        
-        // TODO: Implement actual client request processing
-        // This would involve:
-        // - Listening for client connections
-        // - Parsing client requests (KV operations)
-        // - Proposing operations to the Raft log
-        // - Waiting for commit and applying to KV store
-        // - Sending responses back to clients
+    // For now, this is a simplified implementation that processes one request at a time
+    // In a full implementation, this would use a proper client listener thread
+    
+    if !raft_node.is_leader() {
+        // Only leaders process client requests
+        return Ok(());
+    }
+    
+    // Try to accept a client connection on client port (non-blocking)
+    static CLIENT_LISTENER: std::sync::OnceLock<std::sync::Mutex<Option<(TcpListener, String)>>> = std::sync::OnceLock::new();
+    
+    let listener_mutex = CLIENT_LISTENER.get_or_init(|| {
+        // Use port 9080 for client connections (server port + 1000)
+        let client_address = "127.0.0.1:9080";
+        match TcpListener::bind(client_address) {
+            Ok(listener) => {
+                listener.set_nonblocking(true).unwrap_or_else(|e| {
+                    log::error!("Failed to set client listener non-blocking: {}", e);
+                });
+                log::info!("Client listener started on {}", client_address);
+                std::sync::Mutex::new(Some((listener, client_address.to_string())))
+            }
+            Err(e) => {
+                log::error!("Failed to bind client listener on {}: {}", client_address, e);
+                std::sync::Mutex::new(None)
+            }
+        }
+    });
+    
+    if let Ok(listener_guard) = listener_mutex.try_lock() {
+        if let Some((ref listener, ref _address)) = *listener_guard {
+            match listener.accept() {
+                Ok((mut stream, addr)) => {
+                    log::info!("Accepted client connection from {}", addr);
+                    
+                    // Handle the client request
+                    if let Err(e) = handle_client_connection(&mut stream, raft_node, kv_store) {
+                        log::error!("Error handling client connection: {}", e);
+                    }
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // No pending connections, this is normal
+                }
+                Err(e) => {
+                    log::error!("Error accepting client connection: {}", e);
+                }
+            }
+        }
     }
     
     Ok(())
+}
+
+/// Handle a single client connection
+fn handle_client_connection(
+    stream: &mut std::net::TcpStream,
+    raft_node: &mut raft::RaftNode,
+    kv_store: &mut kv::InMemoryKVStore,
+) -> Result<()> {
+    use std::io::{Read, Write, BufReader, BufWriter};
+    
+    let stream_clone = stream.try_clone()
+        .map_err(|e| Error::Network(format!("Failed to clone stream: {}", e)))?;
+    let mut reader = BufReader::new(stream);
+    let mut writer = BufWriter::new(stream_clone);
+    
+    // Read request header (4 bytes for length)
+    let mut header = [0u8; 4];
+    reader.read_exact(&mut header)
+        .map_err(|e| Error::Network(format!("Failed to read request header: {}", e)))?;
+    
+    let request_len = u32::from_be_bytes(header) as usize;
+    
+    // Validate request length
+    if request_len > 1024 * 1024 { // 1MB limit
+        return Err(Error::Network("Request too large".to_string()));
+    }
+    
+    // Read request data
+    let mut request_data = vec![0u8; request_len];
+    reader.read_exact(&mut request_data)
+        .map_err(|e| Error::Network(format!("Failed to read request data: {}", e)))?;
+    
+    log::debug!("Received {} byte client request", request_len);
+    
+    // Deserialize the KV operation
+    let operation = kv::KVOperation::from_bytes(&request_data)
+        .map_err(|e| Error::Network(format!("Failed to deserialize operation: {}", e)))?;
+    
+    log::debug!("Processing client operation: {:?}", operation);
+    
+    // Process the operation and get response
+    let response = process_kv_operation(operation, raft_node, kv_store)?;
+    
+    // Serialize the response
+    let response_bytes = serialize_kv_response(&response)?;
+    
+    // Send response header (4 bytes for length)
+    let response_len = response_bytes.len() as u32;
+    writer.write_all(&response_len.to_be_bytes())
+        .map_err(|e| Error::Network(format!("Failed to send response header: {}", e)))?;
+    
+    // Send response data
+    writer.write_all(&response_bytes)
+        .map_err(|e| Error::Network(format!("Failed to send response data: {}", e)))?;
+    
+    writer.flush()
+        .map_err(|e| Error::Network(format!("Failed to flush response: {}", e)))?;
+    
+    log::debug!("Sent {} byte response to client", response_bytes.len());
+    
+    Ok(())
+}
+
+/// Process a KV operation through the Raft consensus layer
+fn process_kv_operation(
+    operation: kv::KVOperation,
+    raft_node: &mut raft::RaftNode,
+    kv_store: &mut kv::InMemoryKVStore,
+) -> Result<kv::KVResponse> {
+    match operation {
+        kv::KVOperation::Get { key } => {
+            // Read operations can be served directly from the KV store
+            log::debug!("Processing GET operation for key: {}", key);
+            let value = kv_store.get(&key);
+            Ok(kv::KVResponse::Get { key, value })
+        }
+        kv::KVOperation::Put { key, value } => {
+            // Write operations need to go through Raft consensus
+            log::debug!("Processing PUT operation for key: {}", key);
+            
+            // For now, simulate the Raft consensus process
+            // In a full implementation, this would:
+            // 1. Create a log entry with the operation
+            // 2. Propose it to the Raft log
+            // 3. Wait for it to be committed
+            // 4. Apply it to the KV store
+            // 5. Return success response
+            
+            // Simulate applying the operation directly to the store
+            kv_store.put(key.clone(), value);
+            log::debug!("PUT operation completed for key: {}", key);
+            
+            Ok(kv::KVResponse::Put { key })
+        }
+        kv::KVOperation::Delete { key } => {
+            // Write operations need to go through Raft consensus
+            log::debug!("Processing DELETE operation for key: {}", key);
+            
+            // Simulate applying the operation directly to the store
+            let existed = kv_store.delete(&key);
+            log::debug!("DELETE operation completed for key: {} (existed: {})", key, existed);
+            
+            Ok(kv::KVResponse::Delete { key })
+        }
+        kv::KVOperation::List => {
+            // Read operations can be served directly from the KV store
+            log::debug!("Processing LIST operation");
+            let keys = kv_store.list_keys();
+            log::debug!("LIST operation completed, found {} keys", keys.len());
+            Ok(kv::KVResponse::List { keys })
+        }
+    }
+}
+
+/// Serialize a KV response to bytes
+fn serialize_kv_response(response: &kv::KVResponse) -> Result<Vec<u8>> {
+    match response {
+        kv::KVResponse::Get { key, value } => {
+            let mut bytes = vec![0u8]; // Response type: Get
+            let key_len = key.len() as u32;
+            bytes.extend_from_slice(&key_len.to_be_bytes());
+            bytes.extend_from_slice(key.as_bytes());
+            
+            match value {
+                Some(val) => {
+                    bytes.push(1u8); // Has value
+                    bytes.extend_from_slice(val);
+                }
+                None => {
+                    bytes.push(0u8); // No value
+                }
+            }
+            Ok(bytes)
+        }
+        kv::KVResponse::Put { key } => {
+            let mut bytes = vec![1u8]; // Response type: Put
+            let key_len = key.len() as u32;
+            bytes.extend_from_slice(&key_len.to_be_bytes());
+            bytes.extend_from_slice(key.as_bytes());
+            Ok(bytes)
+        }
+        kv::KVResponse::Delete { key } => {
+            let mut bytes = vec![2u8]; // Response type: Delete
+            let key_len = key.len() as u32;
+            bytes.extend_from_slice(&key_len.to_be_bytes());
+            bytes.extend_from_slice(key.as_bytes());
+            Ok(bytes)
+        }
+        kv::KVResponse::List { keys } => {
+            let mut bytes = vec![4u8]; // Response type: List
+            let key_count = keys.len() as u32;
+            bytes.extend_from_slice(&key_count.to_be_bytes());
+            
+            for key in keys {
+                let key_len = key.len() as u32;
+                bytes.extend_from_slice(&key_len.to_be_bytes());
+                bytes.extend_from_slice(key.as_bytes());
+            }
+            Ok(bytes)
+        }
+        kv::KVResponse::Error { message } => {
+            let mut bytes = vec![3u8]; // Response type: Error
+            bytes.extend_from_slice(message.as_bytes());
+            Ok(bytes)
+        }
+    }
 }
 
 #[derive(Debug)]
