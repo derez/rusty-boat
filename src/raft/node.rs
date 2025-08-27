@@ -329,44 +329,25 @@ impl RaftNode {
         
         let mut vote_granted = false;
         
-        // Grant vote if:
-        // 1. Request term >= our current term
-        // 2. We haven't voted for anyone else in this term
-        // 3. Candidate's log is at least as up-to-date as ours
-        if request.term >= self.current_term {
+        // Apply safety mechanisms first
+        if !self.validate_vote_safety(&request)? {
+            log::info!(
+                "Node {} denied vote to node {} for term {} (safety validation failed)",
+                self.config.node_id, request.candidate_id, request.term
+            );
+        } else if request.term >= self.current_term {
             let can_vote = self.voted_for.is_none() || self.voted_for == Some(request.candidate_id);
             
             if can_vote {
-                // Check if candidate's log is at least as up-to-date as ours
-                let log_up_to_date = if let Some(ref log_storage) = self.log_storage {
-                    let our_last_term = log_storage.get_last_term();
-                    let our_last_index = log_storage.get_last_index();
-                    
-                    // Candidate's log is more up-to-date if:
-                    // 1. Last log term is higher, OR
-                    // 2. Last log terms are equal and last log index is higher or equal
-                    request.last_log_term > our_last_term ||
-                    (request.last_log_term == our_last_term && request.last_log_index >= our_last_index)
-                } else {
-                    true // No log storage, grant vote
-                };
+                vote_granted = true;
+                self.voted_for = Some(request.candidate_id);
+                self.reset_election_timeout(); // Reset timeout since we heard from a candidate
+                self.persist_state()?;
                 
-                if log_up_to_date {
-                    vote_granted = true;
-                    self.voted_for = Some(request.candidate_id);
-                    self.reset_election_timeout(); // Reset timeout since we heard from a candidate
-                    self.persist_state()?;
-                    
-                    log::info!(
-                        "Node {} granted vote to node {} for term {}",
-                        self.config.node_id, request.candidate_id, request.term
-                    );
-                } else {
-                    log::info!(
-                        "Node {} denied vote to node {} for term {} (log not up-to-date)",
-                        self.config.node_id, request.candidate_id, request.term
-                    );
-                }
+                log::info!(
+                    "Node {} granted vote to node {} for term {} (passed safety validation)",
+                    self.config.node_id, request.candidate_id, request.term
+                );
             } else {
                 log::info!(
                     "Node {} denied vote to node {} for term {} (already voted for {:?})",
@@ -541,8 +522,13 @@ impl RaftNode {
         
         let mut success = false;
         
-        // Reply false if term < currentTerm
-        if request.term >= self.current_term {
+        // Apply safety mechanisms first
+        if !self.validate_append_entries_safety(&request)? {
+            log::info!(
+                "Node {} rejecting AppendEntries from node {} for term {} (safety validation failed)",
+                self.config.node_id, request.leader_id, request.term
+            );
+        } else if request.term >= self.current_term {
             // Update current leader and reset election timeout
             self.current_leader = Some(request.leader_id);
             self.reset_election_timeout();
@@ -552,118 +538,94 @@ impl RaftNode {
                 self.transition_to(NodeState::Follower)?;
             }
             
-            // Check log consistency first
-            let log_consistent = if request.prev_log_index == 0 {
-                // No previous entry required
-                true
-            } else {
-                // Check if we have the previous entry and it matches
-                if let Some(ref log_storage) = self.log_storage {
-                    if let Some(prev_entry) = log_storage.get_entry(request.prev_log_index) {
-                        prev_entry.term == request.prev_log_term
-                    } else {
-                        false // We don't have the previous entry
-                    }
-                } else {
-                    false
-                }
-            };
+            success = true;
             
-            if log_consistent {
-                success = true;
+            // If we have entries to append
+            if !request.entries.is_empty() {
+                // Find the first conflicting entry
+                let mut conflict_index = None;
+                let start_index = request.prev_log_index + 1;
                 
-                // If we have entries to append
-                if !request.entries.is_empty() {
-                    // Find the first conflicting entry
-                    let mut conflict_index = None;
-                    let start_index = request.prev_log_index + 1;
-                    
-                    if let Some(ref log_storage) = self.log_storage {
-                        for (i, new_entry) in request.entries.iter().enumerate() {
-                            let entry_index = start_index + i as LogIndex;
-                            if let Some(existing_entry) = log_storage.get_entry(entry_index) {
-                                if existing_entry.term != new_entry.term {
-                                    conflict_index = Some(entry_index);
-                                    break;
-                                }
-                            } else {
-                                // No existing entry at this index, we can append
+                if let Some(ref log_storage) = self.log_storage {
+                    for (i, new_entry) in request.entries.iter().enumerate() {
+                        let entry_index = start_index + i as LogIndex;
+                        if let Some(existing_entry) = log_storage.get_entry(entry_index) {
+                            if existing_entry.term != new_entry.term {
+                                conflict_index = Some(entry_index);
                                 break;
                             }
-                        }
-                    }
-                    
-                    // If there's a conflict, truncate the log from that point
-                    if let Some(conflict_idx) = conflict_index {
-                        log::info!(
-                            "Node {} truncating log from index {} due to conflict",
-                            self.config.node_id, conflict_idx
-                        );
-                        
-                        if let Some(ref mut log_storage) = self.log_storage {
-                            log_storage.truncate_from(conflict_idx)?;
-                        }
-                    }
-                    
-                    // Append new entries - need to update indices to match the expected positions
-                    log::info!(
-                        "Node {} appending {} entries starting at index {}",
-                        self.config.node_id, request.entries.len(), start_index
-                    );
-                    
-                    // Create entries with correct indices for appending
-                    let mut entries_to_append = Vec::new();
-                    for (i, entry) in request.entries.iter().enumerate() {
-                        let target_index = start_index + i as LogIndex;
-                        // Create new entry with the correct index
-                        let new_entry = LogEntry::new(entry.term, target_index, entry.data.clone());
-                        entries_to_append.push(new_entry);
-                    }
-                    
-                    let entries_len = entries_to_append.len();
-                    if let Some(ref mut log_storage) = self.log_storage {
-                        log_storage.append_entries(entries_to_append)?;
-                    }
-                    
-                    // Update commit index
-                    if request.leader_commit > self.commit_index {
-                        let last_new_entry_index = request.prev_log_index + entries_len as LogIndex;
-                        
-                        self.commit_index = std::cmp::min(request.leader_commit, last_new_entry_index);
-                        
-                        log::debug!(
-                            "Node {} updated commit_index to {}",
-                            self.config.node_id, self.commit_index
-                        );
-                        
-                        // Apply committed entries to state machine
-                        self.apply_committed_entries()?;
-                    }
-                } else {
-                    // Heartbeat - just update commit index if needed
-                    if request.leader_commit > self.commit_index {
-                        let last_log_index = if let Some(ref log_storage) = self.log_storage {
-                            log_storage.get_last_index()
                         } else {
-                            0
-                        };
-                        
-                        self.commit_index = std::cmp::min(request.leader_commit, last_log_index);
-                        
-                        log::debug!(
-                            "Node {} updated commit_index to {} (heartbeat)",
-                            self.config.node_id, self.commit_index
-                        );
-                        
-                        // Apply committed entries to state machine
-                        self.apply_committed_entries()?;
+                            // No existing entry at this index, we can append
+                            break;
+                        }
                     }
                 }
-            } else {
+                
+                // If there's a conflict, truncate the log from that point
+                if let Some(conflict_idx) = conflict_index {
+                    log::info!(
+                        "Node {} truncating log from index {} due to conflict",
+                        self.config.node_id, conflict_idx
+                    );
+                    
+                    if let Some(ref mut log_storage) = self.log_storage {
+                        log_storage.truncate_from(conflict_idx)?;
+                    }
+                }
+                
+                // Append new entries - need to update indices to match the expected positions
                 log::info!(
-                    "Node {} rejecting AppendEntries due to log inconsistency (prev_log_index: {}, prev_log_term: {})",
-                    self.config.node_id, request.prev_log_index, request.prev_log_term
+                    "Node {} appending {} entries starting at index {}",
+                    self.config.node_id, request.entries.len(), start_index
                 );
+                
+                // Create entries with correct indices for appending
+                let mut entries_to_append = Vec::new();
+                for (i, entry) in request.entries.iter().enumerate() {
+                    let target_index = start_index + i as LogIndex;
+                    // Create new entry with the correct index
+                    let new_entry = LogEntry::new(entry.term, target_index, entry.data.clone());
+                    entries_to_append.push(new_entry);
+                }
+                
+                let entries_len = entries_to_append.len();
+                if let Some(ref mut log_storage) = self.log_storage {
+                    log_storage.append_entries(entries_to_append)?;
+                }
+                
+                // Update commit index
+                if request.leader_commit > self.commit_index {
+                    let last_new_entry_index = request.prev_log_index + entries_len as LogIndex;
+                    
+                    self.commit_index = std::cmp::min(request.leader_commit, last_new_entry_index);
+                    
+                    log::debug!(
+                        "Node {} updated commit_index to {}",
+                        self.config.node_id, self.commit_index
+                    );
+                    
+                    // Apply committed entries to state machine
+                    self.apply_committed_entries()?;
+                }
+            } else {
+                // Heartbeat - just update commit index if needed
+                if request.leader_commit > self.commit_index {
+                    let last_log_index = if let Some(ref log_storage) = self.log_storage {
+                        log_storage.get_last_index()
+                    } else {
+                        0
+                    };
+                    
+                    self.commit_index = std::cmp::min(request.leader_commit, last_log_index);
+                    
+                    log::debug!(
+                        "Node {} updated commit_index to {} (heartbeat)",
+                        self.config.node_id, self.commit_index
+                    );
+                    
+                    // Apply committed entries to state machine
+                    self.apply_committed_entries()?;
+                }
             }
         } else {
             log::info!(
@@ -885,6 +847,166 @@ impl RaftNode {
     /// Update configuration
     pub fn update_config(&mut self, config: RaftConfig) {
         self.config = config;
+    }
+    
+    // ========== SAFETY MECHANISMS ==========
+    
+    /// Safety Mechanism 1: Election Safety
+    /// Ensures at most one leader per term by validating vote requests
+    pub fn validate_election_safety(&self, candidate_term: Term, candidate_id: NodeId) -> Result<bool> {
+        // If we've already voted for someone else in this term, deny the vote
+        if candidate_term == self.current_term {
+            if let Some(voted_for) = self.voted_for {
+                if voted_for != candidate_id {
+                    log::info!(
+                        "Node {} denying vote to {} for term {} (already voted for {})",
+                        self.config.node_id, candidate_id, candidate_term, voted_for
+                    );
+                    return Ok(false);
+                }
+            }
+        }
+        
+        // If candidate term is less than our current term, deny
+        if candidate_term < self.current_term {
+            log::info!(
+                "Node {} denying vote to {} (candidate term {} < current term {})",
+                self.config.node_id, candidate_id, candidate_term, self.current_term
+            );
+            return Ok(false);
+        }
+        
+        Ok(true)
+    }
+    
+    /// Safety Mechanism 2: Leader Append-Only Property
+    /// Ensures leaders never overwrite or delete existing log entries
+    pub fn validate_leader_append_only(&self, new_entries: &[LogEntry], start_index: LogIndex) -> Result<bool> {
+        if !matches!(self.state, NodeState::Leader) {
+            return Ok(true); // Only applies to leaders
+        }
+        
+        if let Some(ref log_storage) = self.log_storage {
+            // Check that we're not overwriting existing entries with different content
+            for (i, new_entry) in new_entries.iter().enumerate() {
+                let entry_index = start_index + i as LogIndex;
+                
+                if let Some(existing_entry) = log_storage.get_entry(entry_index) {
+                    // Leaders should never overwrite existing entries
+                    if existing_entry.term != new_entry.term || existing_entry.data != new_entry.data {
+                        log::error!(
+                            "Leader {} attempted to overwrite existing entry at index {} (existing: term={}, new: term={})",
+                            self.config.node_id, entry_index, existing_entry.term, new_entry.term
+                        );
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+        
+        Ok(true)
+    }
+    
+    /// Safety Mechanism 3: Log Matching Property
+    /// Validates that if two logs contain an entry with same index and term,
+    /// then the logs are identical in all preceding entries
+    pub fn validate_log_matching(&self, prev_log_index: LogIndex, prev_log_term: Term) -> Result<bool> {
+        if prev_log_index == 0 {
+            return Ok(true); // No previous entry to check
+        }
+        
+        if let Some(ref log_storage) = self.log_storage {
+            if let Some(our_entry) = log_storage.get_entry(prev_log_index) {
+                if our_entry.term == prev_log_term {
+                    // Terms match, so by Log Matching Property, all preceding entries should match
+                    // This is implicitly validated by the Raft protocol's consistency checks
+                    log::debug!(
+                        "Node {} validated log matching at index {} term {}",
+                        self.config.node_id, prev_log_index, prev_log_term
+                    );
+                    return Ok(true);
+                } else {
+                    log::info!(
+                        "Node {} log matching failed at index {} (our term: {}, expected: {})",
+                        self.config.node_id, prev_log_index, our_entry.term, prev_log_term
+                    );
+                    return Ok(false);
+                }
+            } else {
+                log::info!(
+                    "Node {} missing entry at index {} for log matching check",
+                    self.config.node_id, prev_log_index
+                );
+                return Ok(false);
+            }
+        }
+        
+        Ok(true)
+    }
+    
+    /// Safety Mechanism 4: Leader Completeness Guarantee
+    /// Ensures that leaders have all committed entries from previous terms
+    pub fn validate_leader_completeness(&self, candidate_last_log_index: LogIndex, candidate_last_log_term: Term) -> Result<bool> {
+        if let Some(ref log_storage) = self.log_storage {
+            let our_last_index = log_storage.get_last_index();
+            let our_last_term = log_storage.get_last_term();
+            
+            // Candidate's log must be at least as up-to-date as ours
+            // A log is more up-to-date if:
+            // 1. Last log term is higher, OR
+            // 2. Last log terms are equal and last log index is higher or equal
+            let candidate_more_up_to_date = candidate_last_log_term > our_last_term ||
+                (candidate_last_log_term == our_last_term && candidate_last_log_index >= our_last_index);
+            
+            if !candidate_more_up_to_date {
+                log::info!(
+                    "Node {} denying vote - candidate log not up-to-date (candidate: term={}, index={}; ours: term={}, index={})",
+                    self.config.node_id, candidate_last_log_term, candidate_last_log_index, our_last_term, our_last_index
+                );
+                return Ok(false);
+            }
+            
+            log::debug!(
+                "Node {} validated leader completeness for candidate (candidate: term={}, index={}; ours: term={}, index={})",
+                self.config.node_id, candidate_last_log_term, candidate_last_log_index, our_last_term, our_last_index
+            );
+        }
+        
+        Ok(true)
+    }
+    
+    /// Comprehensive safety validation for vote requests
+    pub fn validate_vote_safety(&self, request: &RequestVoteRequest) -> Result<bool> {
+        // Apply all safety mechanisms
+        if !self.validate_election_safety(request.term, request.candidate_id)? {
+            return Ok(false);
+        }
+        
+        if !self.validate_leader_completeness(request.last_log_index, request.last_log_term)? {
+            return Ok(false);
+        }
+        
+        Ok(true)
+    }
+    
+    /// Comprehensive safety validation for append entries
+    pub fn validate_append_entries_safety(&self, request: &AppendEntriesRequest) -> Result<bool> {
+        // Apply log matching property
+        if !self.validate_log_matching(request.prev_log_index, request.prev_log_term)? {
+            return Ok(false);
+        }
+        
+        // Apply leader append-only property (if we're a leader receiving this)
+        if matches!(self.state, NodeState::Leader) && request.term <= self.current_term {
+            // A leader should not accept AppendEntries from another leader in the same term
+            log::warn!(
+                "Leader {} received AppendEntries from {} in same/lower term {} (current term: {})",
+                self.config.node_id, request.leader_id, request.term, self.current_term
+            );
+            return Ok(false);
+        }
+        
+        Ok(true)
     }
 }
 
@@ -1738,5 +1860,303 @@ mod tests {
         mock_node.set_should_error(true);
         let result = mock_node.handle_event(event);
         assert!(result.is_err());
+    }
+
+    // ========== SAFETY MECHANISM TESTS ==========
+
+    #[test]
+    fn test_election_safety_validation() {
+        let config = RaftConfig {
+            node_id: 1,
+            cluster_nodes: vec![0, 1, 2],
+            election_timeout_ms: (150, 300),
+            heartbeat_interval_ms: 50,
+        };
+        
+        let state_storage = Box::new(InMemoryStateStorage::new());
+        let log_storage = Box::new(InMemoryLogStorage::new());
+        let transport = Box::new(MockTransport::new(1));
+        
+        let mut node = RaftNode::with_dependencies(config, state_storage, log_storage, transport).unwrap();
+        
+        // Set up initial state - already voted for candidate 0 in term 2
+        node.current_term = 2;
+        node.voted_for = Some(0);
+        
+        // Test election safety - should deny vote to different candidate in same term
+        assert!(!node.validate_election_safety(2, 2).unwrap());
+        
+        // Should allow vote to same candidate in same term
+        assert!(node.validate_election_safety(2, 0).unwrap());
+        
+        // Should deny vote for lower term
+        assert!(!node.validate_election_safety(1, 2).unwrap());
+        
+        // Should allow vote for higher term
+        assert!(node.validate_election_safety(3, 2).unwrap());
+    }
+
+    #[test]
+    fn test_leader_append_only_validation() {
+        let config = RaftConfig {
+            node_id: 0,
+            cluster_nodes: vec![0, 1, 2],
+            election_timeout_ms: (150, 300),
+            heartbeat_interval_ms: 50,
+        };
+        
+        let state_storage = Box::new(InMemoryStateStorage::new());
+        let mut log_storage = InMemoryLogStorage::new();
+        
+        // Pre-populate log with existing entries
+        let existing_entries = vec![
+            LogEntry::new(1, 1, b"existing1".to_vec()),
+            LogEntry::new(2, 2, b"existing2".to_vec()),
+        ];
+        log_storage.append_entries(existing_entries).unwrap();
+        
+        let transport = Box::new(MockTransport::new(0));
+        let mut node = RaftNode::with_dependencies(config, state_storage, Box::new(log_storage), transport).unwrap();
+        
+        // Become leader
+        node.transition_to(NodeState::Leader).unwrap();
+        
+        // Test appending new entries (should be allowed)
+        let new_entries = vec![LogEntry::new(3, 3, b"new_entry".to_vec())];
+        assert!(node.validate_leader_append_only(&new_entries, 3).unwrap());
+        
+        // Test overwriting existing entry with different content (should be denied)
+        let conflicting_entries = vec![LogEntry::new(3, 2, b"different_data".to_vec())];
+        assert!(!node.validate_leader_append_only(&conflicting_entries, 2).unwrap());
+        
+        // Test overwriting with same content (should be allowed)
+        let same_entries = vec![LogEntry::new(2, 2, b"existing2".to_vec())];
+        assert!(node.validate_leader_append_only(&same_entries, 2).unwrap());
+        
+        // Non-leaders should always pass this check
+        node.transition_to(NodeState::Follower).unwrap();
+        assert!(node.validate_leader_append_only(&conflicting_entries, 2).unwrap());
+    }
+
+    #[test]
+    fn test_log_matching_validation() {
+        let config = RaftConfig {
+            node_id: 1,
+            cluster_nodes: vec![0, 1, 2],
+            election_timeout_ms: (150, 300),
+            heartbeat_interval_ms: 50,
+        };
+        
+        let state_storage = Box::new(InMemoryStateStorage::new());
+        let mut log_storage = InMemoryLogStorage::new();
+        
+        // Pre-populate log
+        let entries = vec![
+            LogEntry::new(1, 1, b"entry1".to_vec()),
+            LogEntry::new(2, 2, b"entry2".to_vec()),
+            LogEntry::new(3, 3, b"entry3".to_vec()),
+        ];
+        log_storage.append_entries(entries).unwrap();
+        
+        let transport = Box::new(MockTransport::new(1));
+        let node = RaftNode::with_dependencies(config, state_storage, Box::new(log_storage), transport).unwrap();
+        
+        // Test matching prev_log_index and prev_log_term
+        assert!(node.validate_log_matching(2, 2).unwrap()); // Entry 2 has term 2
+        assert!(node.validate_log_matching(3, 3).unwrap()); // Entry 3 has term 3
+        
+        // Test mismatched prev_log_term
+        assert!(!node.validate_log_matching(2, 1).unwrap()); // Entry 2 has term 2, not 1
+        assert!(!node.validate_log_matching(3, 2).unwrap()); // Entry 3 has term 3, not 2
+        
+        // Test missing entry
+        assert!(!node.validate_log_matching(5, 4).unwrap()); // No entry at index 5
+        
+        // Test prev_log_index = 0 (should always pass)
+        assert!(node.validate_log_matching(0, 0).unwrap());
+    }
+
+    #[test]
+    fn test_leader_completeness_validation() {
+        let config = RaftConfig {
+            node_id: 1,
+            cluster_nodes: vec![0, 1, 2],
+            election_timeout_ms: (150, 300),
+            heartbeat_interval_ms: 50,
+        };
+        
+        let state_storage = Box::new(InMemoryStateStorage::new());
+        let mut log_storage = InMemoryLogStorage::new();
+        
+        // Our log: term 2, index 3
+        let our_entries = vec![
+            LogEntry::new(1, 1, b"entry1".to_vec()),
+            LogEntry::new(2, 2, b"entry2".to_vec()),
+            LogEntry::new(2, 3, b"entry3".to_vec()),
+        ];
+        log_storage.append_entries(our_entries).unwrap();
+        
+        let transport = Box::new(MockTransport::new(1));
+        let node = RaftNode::with_dependencies(config, state_storage, Box::new(log_storage), transport).unwrap();
+        
+        // Candidate with higher term should be granted vote
+        assert!(node.validate_leader_completeness(3, 3).unwrap()); // Higher term
+        
+        // Candidate with same term but higher index should be granted vote
+        assert!(node.validate_leader_completeness(4, 2).unwrap()); // Same term, higher index
+        
+        // Candidate with same term and same index should be granted vote
+        assert!(node.validate_leader_completeness(3, 2).unwrap()); // Same term, same index
+        
+        // Candidate with lower term should be denied vote
+        assert!(!node.validate_leader_completeness(3, 1).unwrap()); // Lower term
+        
+        // Candidate with same term but lower index should be denied vote
+        assert!(!node.validate_leader_completeness(2, 2).unwrap()); // Same term, lower index
+    }
+
+    #[test]
+    fn test_vote_safety_integration() {
+        let config = RaftConfig {
+            node_id: 1,
+            cluster_nodes: vec![0, 1, 2],
+            election_timeout_ms: (150, 300),
+            heartbeat_interval_ms: 50,
+        };
+        
+        let state_storage = Box::new(InMemoryStateStorage::new());
+        let mut log_storage = InMemoryLogStorage::new();
+        
+        // Add some entries to our log
+        let entries = vec![
+            LogEntry::new(1, 1, b"entry1".to_vec()),
+            LogEntry::new(2, 2, b"entry2".to_vec()),
+        ];
+        log_storage.append_entries(entries).unwrap();
+        
+        let transport = Box::new(MockTransport::new(1));
+        let mut node = RaftNode::with_dependencies(config, state_storage, Box::new(log_storage), transport).unwrap();
+        
+        // Test vote request that should pass all safety checks
+        let valid_request = RequestVoteRequest::new(3, 0, 2, 2); // Higher term, up-to-date log
+        let response = node.handle_vote_request(valid_request).unwrap();
+        assert!(response.vote_granted);
+        
+        // Test vote request that should fail leader completeness
+        let invalid_request = RequestVoteRequest::new(4, 2, 1, 1); // Higher term but outdated log
+        let response = node.handle_vote_request(invalid_request).unwrap();
+        assert!(!response.vote_granted);
+        
+        // Test vote request that should fail election safety (already voted)
+        let duplicate_request = RequestVoteRequest::new(3, 2, 2, 2); // Same term, different candidate
+        let response = node.handle_vote_request(duplicate_request).unwrap();
+        assert!(!response.vote_granted);
+    }
+
+    #[test]
+    fn test_append_entries_safety_integration() {
+        let config = RaftConfig {
+            node_id: 1,
+            cluster_nodes: vec![0, 1, 2],
+            election_timeout_ms: (150, 300),
+            heartbeat_interval_ms: 50,
+        };
+        
+        let state_storage = Box::new(InMemoryStateStorage::new());
+        let mut log_storage = InMemoryLogStorage::new();
+        
+        // Pre-populate log
+        let entries = vec![
+            LogEntry::new(1, 1, b"entry1".to_vec()),
+            LogEntry::new(2, 2, b"entry2".to_vec()),
+        ];
+        log_storage.append_entries(entries).unwrap();
+        
+        let transport = Box::new(MockTransport::new(1));
+        let mut node = RaftNode::with_dependencies(config, state_storage, Box::new(log_storage), transport).unwrap();
+        
+        // Test valid AppendEntries that should pass safety checks
+        let valid_entries = vec![LogEntry::new(3, 3, b"entry3".to_vec())];
+        let valid_request = AppendEntriesRequest::new(3, 0, 2, 2, valid_entries, 0);
+        let response = node.handle_append_entries(valid_request).unwrap();
+        assert!(response.success);
+        
+        // Test AppendEntries with log matching failure
+        let invalid_entries = vec![LogEntry::new(3, 4, b"entry4".to_vec())];
+        let invalid_request = AppendEntriesRequest::new(3, 0, 2, 1, invalid_entries, 0); // Wrong prev_log_term
+        let response = node.handle_append_entries(invalid_request).unwrap();
+        assert!(!response.success);
+        
+        // Test leader receiving AppendEntries from another leader in same term
+        node.transition_to(NodeState::Leader).unwrap();
+        let leader_conflict = AppendEntriesRequest::new(3, 2, 3, 3, vec![], 0); // Same term
+        let response = node.handle_append_entries(leader_conflict).unwrap();
+        assert!(!response.success);
+    }
+
+    #[test]
+    fn test_safety_mechanisms_prevent_split_brain() {
+        let config = RaftConfig {
+            node_id: 1,
+            cluster_nodes: vec![0, 1, 2],
+            election_timeout_ms: (150, 300),
+            heartbeat_interval_ms: 50,
+        };
+        
+        let state_storage = Box::new(InMemoryStateStorage::new());
+        let log_storage = Box::new(InMemoryLogStorage::new());
+        let transport = Box::new(MockTransport::new(1));
+        
+        let mut node = RaftNode::with_dependencies(config, state_storage, log_storage, transport).unwrap();
+        
+        // Node votes for candidate 0 in term 2
+        let vote_request1 = RequestVoteRequest::new(2, 0, 0, 0);
+        let response1 = node.handle_vote_request(vote_request1).unwrap();
+        assert!(response1.vote_granted);
+        assert_eq!(node.voted_for, Some(0));
+        
+        // Another candidate (2) tries to get vote in same term - should be denied
+        let vote_request2 = RequestVoteRequest::new(2, 2, 0, 0);
+        let response2 = node.handle_vote_request(vote_request2).unwrap();
+        assert!(!response2.vote_granted); // Election safety prevents double voting
+        assert_eq!(node.voted_for, Some(0)); // Still voted for original candidate
+        
+        // This prevents split-brain scenario where multiple leaders could emerge in same term
+    }
+
+    #[test]
+    fn test_safety_mechanisms_preserve_committed_entries() {
+        let config = RaftConfig {
+            node_id: 1,
+            cluster_nodes: vec![0, 1, 2],
+            election_timeout_ms: (150, 300),
+            heartbeat_interval_ms: 50,
+        };
+        
+        let state_storage = Box::new(InMemoryStateStorage::new());
+        let mut log_storage = InMemoryLogStorage::new();
+        
+        // Simulate committed entries from previous terms
+        let committed_entries = vec![
+            LogEntry::new(1, 1, b"committed1".to_vec()),
+            LogEntry::new(2, 2, b"committed2".to_vec()),
+        ];
+        log_storage.append_entries(committed_entries).unwrap();
+        
+        let transport = Box::new(MockTransport::new(1));
+        let mut node = RaftNode::with_dependencies(config, state_storage, Box::new(log_storage), transport).unwrap();
+        
+        // Set commit index to indicate these entries are committed
+        node.commit_index = 2;
+        
+        // Candidate with incomplete log should be denied vote (leader completeness)
+        let incomplete_candidate = RequestVoteRequest::new(3, 0, 1, 1); // Missing committed entry 2
+        let response = node.handle_vote_request(incomplete_candidate).unwrap();
+        assert!(!response.vote_granted);
+        
+        // Only candidates with complete logs should be granted votes
+        let complete_candidate = RequestVoteRequest::new(3, 0, 2, 2); // Has all committed entries
+        let response = node.handle_vote_request(complete_candidate).unwrap();
+        assert!(response.vote_granted);
     }
 }
