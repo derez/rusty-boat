@@ -23,7 +23,7 @@ pub trait NetworkTransport: Send + Sync {
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::net::{TcpListener, TcpStream, SocketAddr};
-use std::io::{Read, Write};
+use std::io::{Read, Write, BufReader, BufWriter};
 use std::thread;
 use std::time::Duration;
 
@@ -39,6 +39,8 @@ pub struct TcpTransport {
     incoming_messages: Arc<Mutex<Vec<(NodeId, Vec<u8>)>>>,
     /// Node ID of this transport
     node_id: NodeId,
+    /// Whether the listener thread is running
+    listener_running: Arc<Mutex<bool>>,
 }
 
 impl TcpTransport {
@@ -56,7 +58,7 @@ impl TcpTransport {
         listener.set_nonblocking(true)
             .map_err(|e| Error::Network(format!("Failed to set non-blocking mode: {}", e)))?;
         
-        log::info!("TCP transport: listening on {} for node {}", bind_addr, node_id);
+        println!("TCP transport: listening on {} for node {}", bind_addr, node_id);
         
         Ok(Self {
             config,
@@ -64,6 +66,7 @@ impl TcpTransport {
             connections: Arc::new(Mutex::new(HashMap::new())),
             incoming_messages: Arc::new(Mutex::new(Vec::new())),
             node_id,
+            listener_running: Arc::new(Mutex::new(false)),
         })
     }
     
@@ -76,12 +79,12 @@ impl TcpTransport {
             let node_id = self.node_id;
             
             thread::spawn(move || {
-                log::info!("TCP transport: started listener thread for node {}", node_id);
+                println!("TCP transport: started listener thread for node {}", node_id);
                 
                 loop {
                     match listener_clone.accept() {
                         Ok((mut stream, addr)) => {
-                            log::debug!("TCP transport: accepted connection from {}", addr);
+                            println!("TCP transport: accepted connection from {}", addr);
                             
                             // Handle connection in a separate thread
                             let incoming_messages_clone = Arc::clone(&incoming_messages);
@@ -94,7 +97,7 @@ impl TcpTransport {
                             thread::sleep(Duration::from_millis(10));
                         }
                         Err(e) => {
-                            log::error!("TCP transport: error accepting connection: {}", e);
+                            eprintln!("TCP transport: error accepting connection: {}", e);
                             thread::sleep(Duration::from_millis(100));
                         }
                     }
@@ -105,100 +108,129 @@ impl TcpTransport {
         Ok(())
     }
     
-    /// Handle an incoming TCP connection
+    /// Handle an incoming TCP connection with proper message framing
     fn handle_connection(
         stream: &mut TcpStream, 
         incoming_messages: Arc<Mutex<Vec<(NodeId, Vec<u8>)>>>,
         node_id: NodeId
     ) {
-        log::debug!("TCP transport: handling connection for node {}", node_id);
+        println!("TCP transport: handling connection for node {}", node_id);
         
-        let mut buffer = [0; 4096];
+        // Set stream to blocking mode for easier message parsing
+        stream.set_nonblocking(false).unwrap_or_else(|e| {
+            eprintln!("TCP transport: failed to set blocking mode: {}", e);
+        });
+        
+        let mut reader = BufReader::new(stream);
+        let mut message_buffer = Vec::new();
+        
         loop {
-            match stream.read(&mut buffer) {
-                Ok(0) => {
-                    log::debug!("TCP transport: connection closed");
-                    break;
-                }
-                Ok(n) => {
-                    log::trace!("TCP transport: received {} bytes", n);
+            // Read message header: 4 bytes for message length + 8 bytes for sender node_id
+            let mut header = [0u8; 12];
+            match reader.read_exact(&mut header) {
+                Ok(()) => {
+                    // Parse message length (first 4 bytes)
+                    let message_len = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
                     
-                    // Parse message (simple format: 8 bytes for sender node_id + message data)
-                    if n >= 8 {
-                        let sender_bytes = &buffer[0..8];
-                        let sender_id = u64::from_be_bytes([
-                            sender_bytes[0], sender_bytes[1], sender_bytes[2], sender_bytes[3],
-                            sender_bytes[4], sender_bytes[5], sender_bytes[6], sender_bytes[7],
-                        ]);
-                        
-                        let message_data = buffer[8..n].to_vec();
-                        
-                        log::debug!("TCP transport: received message from node {} ({} bytes)", 
-                                   sender_id, message_data.len());
-                        
-                        // Add to incoming message queue
-                        incoming_messages.lock().unwrap().push((sender_id, message_data));
-                    } else {
-                        log::warn!("TCP transport: received message too short ({} bytes)", n);
+                    // Parse sender node_id (next 8 bytes)
+                    let sender_id = u64::from_be_bytes([
+                        header[4], header[5], header[6], header[7],
+                        header[8], header[9], header[10], header[11],
+                    ]);
+                    
+                    // Validate message length (prevent excessive memory allocation)
+                    if message_len > 1024 * 1024 { // 1MB limit
+                        eprintln!("TCP transport: message too large ({} bytes), closing connection", message_len);
+                        break;
+                    }
+                    
+                    // Read message data
+                    message_buffer.clear();
+                    message_buffer.resize(message_len, 0);
+                    
+                    match reader.read_exact(&mut message_buffer) {
+                        Ok(()) => {
+                            println!("TCP transport: received complete message from node {} ({} bytes)", 
+                                       sender_id, message_len);
+                            
+                            // Add to incoming message queue
+                            incoming_messages.lock().unwrap().push((sender_id, message_buffer.clone()));
+                        }
+                        Err(e) => {
+                            eprintln!("TCP transport: error reading message data: {}", e);
+                            break;
+                        }
                     }
                 }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(10));
-                }
                 Err(e) => {
-                    log::error!("TCP transport: error reading from connection: {}", e);
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                        println!("TCP transport: connection closed by peer");
+                    } else {
+                        eprintln!("TCP transport: error reading message header: {}", e);
+                    }
                     break;
                 }
             }
         }
+        
+        println!("TCP transport: connection handler exiting for node {}", node_id);
     }
 }
 
 impl NetworkTransport for TcpTransport {
     fn send_message(&self, to: NodeId, message: Vec<u8>) -> Result<()> {
-        log::debug!("TCP transport: attempting to send {} byte message to node {}", message.len(), to);
+        println!("TCP transport: attempting to send {} byte message to node {}", message.len(), to);
         
         // Get target address from cluster configuration
         if let Some(node_address) = self.config.cluster_addresses.get(&to) {
-            log::trace!("TCP transport: sending message to node {} at address {}", to, node_address.socket_addr());
+            println!("TCP transport: sending message to node {} at address {}", to, node_address.socket_addr());
             
             // Connect to target node
             let addr: SocketAddr = node_address.socket_addr().parse()
                 .map_err(|e| Error::Network(format!("Invalid address '{}': {}", node_address.socket_addr(), e)))?;
             
-            let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
+            let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
                 .map_err(|e| Error::Network(format!("Failed to connect to {}: {}", addr, e)))?;
             
-            // Prepare message with sender node_id prefix (8 bytes + message data)
-            let mut full_message = Vec::with_capacity(8 + message.len());
-            full_message.extend_from_slice(&self.node_id.to_be_bytes());
-            full_message.extend_from_slice(&message);
+            let mut writer = BufWriter::new(stream);
             
-            // Send message
-            stream.write_all(&full_message)
+            // Prepare framed message: 4 bytes length + 8 bytes sender node_id + message data
+            let message_len = message.len() as u32;
+            let mut framed_message = Vec::with_capacity(4 + 8 + message.len());
+            
+            // Add message length (4 bytes)
+            framed_message.extend_from_slice(&message_len.to_be_bytes());
+            
+            // Add sender node_id (8 bytes)
+            framed_message.extend_from_slice(&self.node_id.to_be_bytes());
+            
+            // Add message data
+            framed_message.extend_from_slice(&message);
+            
+            // Send framed message
+            writer.write_all(&framed_message)
                 .map_err(|e| Error::Network(format!("Failed to send message: {}", e)))?;
             
-            log::info!("TCP transport: successfully sent {} byte message to node {}", message.len(), to);
+            // Ensure message is sent immediately
+            writer.flush()
+                .map_err(|e| Error::Network(format!("Failed to flush message: {}", e)))?;
+            
+            println!("TCP transport: successfully sent {} byte framed message to node {}", message.len(), to);
             Ok(())
         } else {
-            log::error!("TCP transport: node {} address not found in cluster configuration", to);
+            eprintln!("TCP transport: node {} address not found in cluster configuration", to);
             Err(Error::Network(format!("Node {} address not found", to)))
         }
     }
     
     fn receive_messages(&self) -> Vec<(NodeId, Vec<u8>)> {
-        log::trace!("TCP transport: checking for incoming messages");
-        
         // Get messages from the incoming queue
         let mut incoming = self.incoming_messages.lock().unwrap();
         let messages = incoming.clone();
         incoming.clear();
         
         if !messages.is_empty() {
-            log::debug!("TCP transport: delivering {} incoming messages", messages.len());
-            for (from, msg) in &messages {
-                log::trace!("TCP transport: delivering {} byte message from node {}", msg.len(), from);
-            }
+            println!("TCP transport: delivering {} incoming messages", messages.len());
         }
         
         messages
@@ -206,17 +238,12 @@ impl NetworkTransport for TcpTransport {
     
     fn is_connected(&self, node_id: NodeId) -> bool {
         let connections = self.connections.lock().unwrap();
-        let connected = connections.contains_key(&node_id);
-        log::trace!("TCP transport: connection status for node {}: {}", node_id, connected);
-        connected
+        connections.contains_key(&node_id)
     }
     
     fn connected_nodes(&self) -> Vec<NodeId> {
         let connections = self.connections.lock().unwrap();
-        let connected: Vec<NodeId> = connections.keys().cloned().collect();
-        
-        log::debug!("TCP transport: {} nodes currently connected: {:?}", connected.len(), connected);
-        connected
+        connections.keys().cloned().collect()
     }
 }
 
@@ -300,14 +327,7 @@ impl MockTransport {
 
 impl NetworkTransport for MockTransport {
     fn send_message(&self, to: NodeId, message: Vec<u8>) -> Result<()> {
-        log::debug!("Mock transport (node {}): sending {} byte message to node {}", 
-                   self.node_id, message.len(), to);
-        log::trace!("Mock transport (node {}): message content: {:?}", self.node_id, message);
-        
-        self.sent_messages.lock().unwrap().push((to, message.clone()));
-        
-        log::info!("Mock transport (node {}): successfully queued message for node {}", 
-                  self.node_id, to);
+        self.sent_messages.lock().unwrap().push((to, message));
         Ok(())
     }
     
@@ -315,33 +335,15 @@ impl NetworkTransport for MockTransport {
         let mut messages = self.incoming_messages.lock().unwrap();
         let result = messages.clone();
         messages.clear();
-        
-        if !result.is_empty() {
-            log::debug!("Mock transport (node {}): delivering {} incoming messages", 
-                       self.node_id, result.len());
-            for (from, msg) in &result {
-                log::trace!("Mock transport (node {}): delivering {} byte message from node {}", 
-                           self.node_id, msg.len(), from);
-            }
-        } else {
-            log::trace!("Mock transport (node {}): no incoming messages", self.node_id);
-        }
-        
         result
     }
     
     fn is_connected(&self, node_id: NodeId) -> bool {
-        let connected = self.connected_nodes.lock().unwrap().contains(&node_id);
-        log::trace!("Mock transport (node {}): connection status for node {}: {}", 
-                   self.node_id, node_id, connected);
-        connected
+        self.connected_nodes.lock().unwrap().contains(&node_id)
     }
     
     fn connected_nodes(&self) -> Vec<NodeId> {
-        let connected = self.connected_nodes.lock().unwrap().clone();
-        log::debug!("Mock transport (node {}): {} nodes connected: {:?}", 
-                   self.node_id, connected.len(), connected);
-        connected
+        self.connected_nodes.lock().unwrap().clone()
     }
 }
 

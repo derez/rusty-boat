@@ -160,10 +160,8 @@ impl RaftMessage {
         }
     }
     
-    /// Serialize message to bytes (simple implementation)
+    /// Serialize message to bytes with complete implementation
     pub fn to_bytes(&self) -> Vec<u8> {
-        // This is a very simple serialization - in a real implementation
-        // you would use a proper serialization format like protobuf or bincode
         match self {
             RaftMessage::RequestVote(req) => {
                 let mut bytes = vec![0u8]; // Message type
@@ -188,7 +186,14 @@ impl RaftMessage {
                 bytes.extend_from_slice(&req.prev_log_term.to_be_bytes());
                 bytes.extend_from_slice(&req.leader_commit.to_be_bytes());
                 bytes.extend_from_slice(&(req.entries.len() as u32).to_be_bytes());
-                // For simplicity, we'll skip serializing the actual entries
+                
+                // Serialize each log entry
+                for entry in &req.entries {
+                    bytes.extend_from_slice(&entry.term.to_be_bytes());
+                    bytes.extend_from_slice(&entry.index.to_be_bytes());
+                    bytes.extend_from_slice(&(entry.data.len() as u32).to_be_bytes());
+                    bytes.extend_from_slice(&entry.data);
+                }
                 bytes
             }
             RaftMessage::AppendEntriesResponse(resp) => {
@@ -199,6 +204,185 @@ impl RaftMessage {
                 bytes.extend_from_slice(&resp.last_log_index.to_be_bytes());
                 bytes
             }
+        }
+    }
+    
+    /// Deserialize message from bytes
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, crate::Error> {
+        if bytes.is_empty() {
+            return Err(crate::Error::Network("Empty message".to_string()));
+        }
+        
+        let msg_type = bytes[0];
+        let mut offset = 1;
+        
+        match msg_type {
+            0 => {
+                // RequestVote
+                if bytes.len() < 33 { // 1 + 8 + 8 + 8 + 8
+                    return Err(crate::Error::Network("RequestVote message too short".to_string()));
+                }
+                
+                let term = u64::from_be_bytes([
+                    bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                    bytes[offset+4], bytes[offset+5], bytes[offset+6], bytes[offset+7],
+                ]);
+                offset += 8;
+                
+                let candidate_id = u64::from_be_bytes([
+                    bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                    bytes[offset+4], bytes[offset+5], bytes[offset+6], bytes[offset+7],
+                ]);
+                offset += 8;
+                
+                let last_log_index = u64::from_be_bytes([
+                    bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                    bytes[offset+4], bytes[offset+5], bytes[offset+6], bytes[offset+7],
+                ]);
+                offset += 8;
+                
+                let last_log_term = u64::from_be_bytes([
+                    bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                    bytes[offset+4], bytes[offset+5], bytes[offset+6], bytes[offset+7],
+                ]);
+                
+                Ok(RaftMessage::RequestVote(RequestVoteRequest::new(
+                    term, candidate_id, last_log_index, last_log_term
+                )))
+            }
+            1 => {
+                // RequestVoteResponse
+                if bytes.len() < 18 { // 1 + 8 + 1 + 8
+                    return Err(crate::Error::Network("RequestVoteResponse message too short".to_string()));
+                }
+                
+                let term = u64::from_be_bytes([
+                    bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                    bytes[offset+4], bytes[offset+5], bytes[offset+6], bytes[offset+7],
+                ]);
+                offset += 8;
+                
+                let vote_granted = bytes[offset] != 0;
+                offset += 1;
+                
+                let voter_id = u64::from_be_bytes([
+                    bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                    bytes[offset+4], bytes[offset+5], bytes[offset+6], bytes[offset+7],
+                ]);
+                
+                Ok(RaftMessage::RequestVoteResponse(RequestVoteResponse::new(
+                    term, vote_granted, voter_id
+                )))
+            }
+            2 => {
+                // AppendEntries
+                if bytes.len() < 45 { // 1 + 8 + 8 + 8 + 8 + 8 + 4
+                    return Err(crate::Error::Network("AppendEntries message too short".to_string()));
+                }
+                
+                let term = u64::from_be_bytes([
+                    bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                    bytes[offset+4], bytes[offset+5], bytes[offset+6], bytes[offset+7],
+                ]);
+                offset += 8;
+                
+                let leader_id = u64::from_be_bytes([
+                    bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                    bytes[offset+4], bytes[offset+5], bytes[offset+6], bytes[offset+7],
+                ]);
+                offset += 8;
+                
+                let prev_log_index = u64::from_be_bytes([
+                    bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                    bytes[offset+4], bytes[offset+5], bytes[offset+6], bytes[offset+7],
+                ]);
+                offset += 8;
+                
+                let prev_log_term = u64::from_be_bytes([
+                    bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                    bytes[offset+4], bytes[offset+5], bytes[offset+6], bytes[offset+7],
+                ]);
+                offset += 8;
+                
+                let leader_commit = u64::from_be_bytes([
+                    bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                    bytes[offset+4], bytes[offset+5], bytes[offset+6], bytes[offset+7],
+                ]);
+                offset += 8;
+                
+                let entries_count = u32::from_be_bytes([
+                    bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                ]);
+                offset += 4;
+                
+                let mut entries = Vec::new();
+                for _ in 0..entries_count {
+                    if offset + 20 > bytes.len() { // 8 + 8 + 4 minimum for entry header
+                        return Err(crate::Error::Network("AppendEntries entry header too short".to_string()));
+                    }
+                    
+                    let entry_term = u64::from_be_bytes([
+                        bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                        bytes[offset+4], bytes[offset+5], bytes[offset+6], bytes[offset+7],
+                    ]);
+                    offset += 8;
+                    
+                    let entry_index = u64::from_be_bytes([
+                        bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                        bytes[offset+4], bytes[offset+5], bytes[offset+6], bytes[offset+7],
+                    ]);
+                    offset += 8;
+                    
+                    let data_len = u32::from_be_bytes([
+                        bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                    ]) as usize;
+                    offset += 4;
+                    
+                    if offset + data_len > bytes.len() {
+                        return Err(crate::Error::Network("AppendEntries entry data too short".to_string()));
+                    }
+                    
+                    let data = bytes[offset..offset + data_len].to_vec();
+                    offset += data_len;
+                    
+                    entries.push(crate::storage::LogEntry::new(entry_term, entry_index, data));
+                }
+                
+                Ok(RaftMessage::AppendEntries(AppendEntriesRequest::new(
+                    term, leader_id, prev_log_index, prev_log_term, entries, leader_commit
+                )))
+            }
+            3 => {
+                // AppendEntriesResponse
+                if bytes.len() < 26 { // 1 + 8 + 1 + 8 + 8
+                    return Err(crate::Error::Network("AppendEntriesResponse message too short".to_string()));
+                }
+                
+                let term = u64::from_be_bytes([
+                    bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                    bytes[offset+4], bytes[offset+5], bytes[offset+6], bytes[offset+7],
+                ]);
+                offset += 8;
+                
+                let success = bytes[offset] != 0;
+                offset += 1;
+                
+                let follower_id = u64::from_be_bytes([
+                    bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                    bytes[offset+4], bytes[offset+5], bytes[offset+6], bytes[offset+7],
+                ]);
+                offset += 8;
+                
+                let last_log_index = u64::from_be_bytes([
+                    bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                    bytes[offset+4], bytes[offset+5], bytes[offset+6], bytes[offset+7],
+                ]);
+                
+                Ok(RaftMessage::AppendEntriesResponse(AppendEntriesResponse::new(
+                    term, success, follower_id, last_log_index
+                )))
+            }
+            _ => Err(crate::Error::Network(format!("Unknown message type: {}", msg_type))),
         }
     }
 }
@@ -279,5 +463,61 @@ mod tests {
         let bytes = msg.to_bytes();
         assert!(!bytes.is_empty());
         assert_eq!(bytes[0], 0); // Message type for RequestVote
+    }
+
+    #[test]
+    fn test_request_vote_serialization_roundtrip() {
+        let original = RaftMessage::RequestVote(RequestVoteRequest::new(5, 1, 10, 4));
+        let bytes = original.to_bytes();
+        let deserialized = RaftMessage::from_bytes(&bytes).unwrap();
+        assert_eq!(original, deserialized);
+    }
+
+    #[test]
+    fn test_request_vote_response_serialization_roundtrip() {
+        let original = RaftMessage::RequestVoteResponse(RequestVoteResponse::new(5, true, 2));
+        let bytes = original.to_bytes();
+        let deserialized = RaftMessage::from_bytes(&bytes).unwrap();
+        assert_eq!(original, deserialized);
+    }
+
+    #[test]
+    fn test_append_entries_serialization_roundtrip() {
+        let entries = vec![
+            LogEntry::new(3, 5, b"data1".to_vec()),
+            LogEntry::new(3, 6, b"data2".to_vec()),
+        ];
+        let original = RaftMessage::AppendEntries(AppendEntriesRequest::new(3, 1, 4, 2, entries, 4));
+        let bytes = original.to_bytes();
+        let deserialized = RaftMessage::from_bytes(&bytes).unwrap();
+        assert_eq!(original, deserialized);
+    }
+
+    #[test]
+    fn test_append_entries_response_serialization_roundtrip() {
+        let original = RaftMessage::AppendEntriesResponse(AppendEntriesResponse::new(3, true, 2, 6));
+        let bytes = original.to_bytes();
+        let deserialized = RaftMessage::from_bytes(&bytes).unwrap();
+        assert_eq!(original, deserialized);
+    }
+
+    #[test]
+    fn test_heartbeat_serialization_roundtrip() {
+        let original = RaftMessage::AppendEntries(AppendEntriesRequest::heartbeat(3, 1, 4, 2, 4));
+        let bytes = original.to_bytes();
+        let deserialized = RaftMessage::from_bytes(&bytes).unwrap();
+        assert_eq!(original, deserialized);
+    }
+
+    #[test]
+    fn test_invalid_message_deserialization() {
+        // Empty message
+        assert!(RaftMessage::from_bytes(&[]).is_err());
+        
+        // Unknown message type
+        assert!(RaftMessage::from_bytes(&[99]).is_err());
+        
+        // Too short message
+        assert!(RaftMessage::from_bytes(&[0, 1, 2]).is_err());
     }
 }

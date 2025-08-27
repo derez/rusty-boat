@@ -2,17 +2,25 @@
 
 ## Current Work Focus
 
-**Primary Task**: Working CLI Application Implementation - COMPLETED ✅
+**Primary Task**: Network Communication Implementation - READY TO BEGIN 🚀
 
-**Current Phase**: Phase 3 - Working CLI Application (COMPLETED ✅)
+**Current Phase**: Phase 4 - Network Communication (READY TO BEGIN)
+- **Status**: All Phase 3 components completed and ready for network implementation
+- **Foundation**: Complete CLI application with working Raft consensus algorithm
+- **Next Phase**: Implement actual TCP network communication between nodes
+
+**Phase 4 Implementation Plan**: 5-Step Approach
+1. **Step 1**: TCP Transport Implementation - Replace MockTransport with real TCP sockets
+2. **Step 2**: Message Serialization - Implement proper message encoding/decoding over network  
+3. **Step 3**: Server Network Integration - Integrate network communication into server event loop
+4. **Step 4**: Client-Server Network Integration - Connect client operations to distributed Raft cluster
+5. **Step 5**: Multi-Node Cluster Testing - Test actual distributed consensus over network
+
+**Previous Phase**: Phase 3 - Working CLI Application (COMPLETED ✅)
 - Successfully completed main.rs implementation with full CLI functionality
 - Working server and client modes with comprehensive argument parsing
 - Interactive client with all key-value operations (get, put, delete, list, help, quit)
 - Complete integration of all Phase 2 components into runnable application
-
-**Next Phase**: Phase 4 - Network Communication (Ready to Begin)
-- Ready to implement actual TCP communication between nodes
-- Foundation complete for distributed cluster operation
 
 ## Recent Changes
 
@@ -60,51 +68,110 @@
 
 ## Next Steps
 
-### Phase 4: Network Communication (Ready to Begin)
-With the working CLI application complete, the project is ready for Phase 4:
+### Phase 4: Network Communication Implementation (5-Step Plan)
 
-1. **Network Communication Implementation**
-   - Implement actual TCP communication between nodes
-   - Connect client requests to server processing
-   - Message serialization and deserialization
-   - Network error handling and retry logic
+#### Step 1: TCP Transport Implementation
+**Goal**: Replace MockTransport with real TCP socket communication
+- [ ] Implement `TcpTransport::send_message()` with actual TCP sockets
+- [ ] Implement `TcpTransport::receive_messages()` with socket listening
+- [ ] Add connection management (establish, maintain, retry)
+- [ ] Implement message framing for TCP streams
+- [ ] Add network error handling and recovery
+- [ ] Create integration tests for TCP transport
 
-2. **Client-Server Integration**
-   - Route client requests through network to Raft nodes
-   - Implement leader discovery and request forwarding
-   - Handle leader election changes in client
-   - Proper response handling and error propagation
+**Files to Modify**: `src/network/transport.rs`, `src/network/mod.rs`
 
-3. **Multi-Node Cluster Operation**
-   - Test actual multi-node Raft clusters
-   - Verify leader election across network
-   - Test log replication between real nodes
-   - Validate consensus in distributed environment
+#### Step 2: Message Serialization
+**Goal**: Implement proper serialization for Raft messages over network
+- [ ] Add message serialization traits (Serialize/Deserialize)
+- [ ] Implement binary encoding for RaftMessage enum
+- [ ] Add message framing (length prefix + payload)
+- [ ] Implement deserialization with error handling
+- [ ] Add version compatibility for message formats
+- [ ] Create serialization tests
 
-4. **Production Features**
-   - Graceful shutdown handling with Ctrl+C
-   - Configuration file support
-   - Enhanced logging and metrics
-   - Performance optimization
+**Files to Modify**: `src/raft/messages.rs`, `src/network/transport.rs`
+
+#### Step 3: Server Network Integration
+**Goal**: Integrate network communication into server event loop
+- [ ] Modify server event loop to handle network messages
+- [ ] Implement network message processing in main loop
+- [ ] Add network event handling to MessageBus integration
+- [ ] Implement proper message routing between nodes
+- [ ] Add network timeout handling
+- [ ] Create multi-node server tests
+
+**Files to Modify**: `src/main.rs` (server event loop)
+
+#### Step 4: Client-Server Network Integration
+**Goal**: Connect client operations to distributed Raft cluster over network
+- [ ] Implement client request forwarding to Raft leader
+- [ ] Add leader discovery mechanism for clients
+- [ ] Implement request/response handling over network
+- [ ] Add client retry logic for leader changes
+- [ ] Implement proper error propagation from cluster
+- [ ] Create client-server integration tests
+
+**Files to Modify**: `src/kv/client.rs`, `src/main.rs` (client mode)
+
+#### Step 5: Multi-Node Cluster Testing
+**Goal**: Test actual distributed Raft consensus over network
+- [ ] Create multi-node test scenarios with real TCP
+- [ ] Test leader election across network
+- [ ] Test log replication between real nodes
+- [ ] Test network partition scenarios
+- [ ] Test node failure and recovery
+- [ ] Validate data consistency in distributed environment
+
+**Files to Create**: `src/tests/network_integration.rs`
+
+### Phase 5: Production Features (Future)
+- Cluster membership changes (dynamic node addition/removal)
+- Performance optimization (log compaction, snapshotting)
+- Production features (logging, metrics, configuration management)
 
 ## Active Decisions and Considerations
 
+### Phase 4 Technical Considerations
+
+#### Network Protocol Design
+- **Message Framing**: Length-prefixed messages for TCP streams
+- **Connection Management**: Persistent connections between nodes
+- **Error Handling**: Network timeouts, connection failures, retry logic
+- **Performance**: Efficient serialization, connection pooling
+
+#### Serialization Strategy
+- **Binary Format**: Compact binary encoding for efficiency
+- **Version Compatibility**: Forward/backward compatibility for message formats
+- **Error Handling**: Robust deserialization with proper error reporting
+- **Testing**: Comprehensive serialization round-trip tests
+
+#### Integration Approach
+- **Incremental Testing**: Test each component individually before integration
+- **Backward Compatibility**: Maintain existing test suite while adding network features
+- **Error Isolation**: Clear error boundaries between network and consensus layers
+- **Performance Monitoring**: Track network latency and throughput
+
 ### Validated Implementation Decisions
 - **CLI-First Approach**: Proved excellent for demonstrating functionality
-- **Stub Client Operations**: Perfect for testing interface without network complexity
+- **Synchronous Design**: Perfect foundation for network communication
 - **File-Based Storage**: Working correctly with automatic directory creation
 - **Event Loop Structure**: Clean foundation for adding network processing
+- **Trait-Based Interfaces**: Enables easy transition from mock to real implementations
 
 ### Implementation Patterns Confirmed
 - **Command Line Parsing**: Robust argument validation and error handling
 - **Interactive CLI**: User-friendly interface with comprehensive help
 - **Component Integration**: Dependency injection working perfectly
 - **Error Handling**: Comprehensive error propagation throughout application
+- **Testing Strategy**: Incremental approach perfect for network implementation
 
-### Testing Strategy Validated
-- **Incremental Testing**: CLI functionality tested step by step
-- **Integration Verification**: All components initialize correctly
-- **User Experience**: Interactive client provides good developer experience
+### Risk Mitigation Strategies
+- **Network Complexity**: Start with simple TCP, add features incrementally
+- **Serialization Issues**: Comprehensive testing of message formats
+- **Performance Problems**: Profile and optimize critical paths
+- **Integration Bugs**: Maintain existing test suite throughout
+- **Scope Creep**: Focus on core network functionality first
 
 ## Important Patterns and Preferences
 

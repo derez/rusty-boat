@@ -273,18 +273,47 @@
 
 ## What's Left to Build
 
-### Phase 4: Network Communication (Not Started)
-- [ ] **Actual TCP Communication**
-  - Real TCP socket implementation in TcpTransport
-  - Message serialization and deserialization over network
-  - Connection management and retry logic
-  - Network error handling and recovery
+### Phase 4: Network Communication (Ready to Begin)
 
-- [ ] **Client-Server Integration**
-  - Route client requests through network to Raft nodes
-  - Leader discovery and request forwarding
-  - Handle leader election changes in client
-  - Proper response handling and error propagation
+#### Step 1: TCP Transport Implementation (Not Started)
+- [ ] Implement `TcpTransport::send_message()` with actual TCP sockets
+- [ ] Implement `TcpTransport::receive_messages()` with socket listening
+- [ ] Add connection management (establish, maintain, retry)
+- [ ] Implement message framing for TCP streams
+- [ ] Add network error handling and recovery
+- [ ] Create integration tests for TCP transport
+
+#### Step 2: Message Serialization (Not Started)
+- [ ] Add message serialization traits (Serialize/Deserialize)
+- [ ] Implement binary encoding for RaftMessage enum
+- [ ] Add message framing (length prefix + payload)
+- [ ] Implement deserialization with error handling
+- [ ] Add version compatibility for message formats
+- [ ] Create serialization tests
+
+#### Step 3: Server Network Integration (Not Started)
+- [ ] Modify server event loop to handle network messages
+- [ ] Implement network message processing in main loop
+- [ ] Add network event handling to MessageBus integration
+- [ ] Implement proper message routing between nodes
+- [ ] Add network timeout handling
+- [ ] Create multi-node server tests
+
+#### Step 4: Client-Server Network Integration (Not Started)
+- [ ] Implement client request forwarding to Raft leader
+- [ ] Add leader discovery mechanism for clients
+- [ ] Implement request/response handling over network
+- [ ] Add client retry logic for leader changes
+- [ ] Implement proper error propagation from cluster
+- [ ] Create client-server integration tests
+
+#### Step 5: Multi-Node Cluster Testing (Not Started)
+- [ ] Create multi-node test scenarios with real TCP
+- [ ] Test leader election across network
+- [ ] Test log replication between real nodes
+- [ ] Test network partition scenarios
+- [ ] Test node failure and recovery
+- [ ] Validate data consistency in distributed environment
 
 ### Phase 5: Production Features (Not Started)
 - [ ] **Cluster Membership**
@@ -341,11 +370,35 @@
 - **Integration Framework**: TestCluster for multi-node simulation
 - **Documentation**: Complete memory bank with current status
 
+### Phase 4 Success Criteria
+
+#### Functional Requirements
+- [ ] Real TCP communication between Raft nodes
+- [ ] Client operations work through distributed cluster
+- [ ] Leader election functions over network
+- [ ] Log replication works between real nodes
+- [ ] Network failures handled gracefully
+
+#### Quality Requirements
+- [ ] All existing tests continue to pass
+- [ ] New network integration tests added and passing
+- [ ] Clean error handling for network scenarios
+- [ ] Performance acceptable for local testing
+- [ ] Code maintains existing quality standards
+
+#### Integration Requirements
+- [ ] CLI application works with distributed cluster
+- [ ] Client can connect to any node in cluster
+- [ ] Operations are properly forwarded to leader
+- [ ] Consistent behavior across network partitions
+- [ ] Graceful handling of node failures
+
 ### Phase 4 Implementation Plan
-1. **TCP Communication**: Implement actual network communication in TcpTransport
-2. **Message Serialization**: Add proper message serialization over network
-3. **Client-Server Integration**: Connect client requests to server processing
-4. **Multi-Node Testing**: Test actual distributed clusters over network
+1. **Step 1**: TCP Transport Implementation - Replace MockTransport with real TCP sockets
+2. **Step 2**: Message Serialization - Implement proper message encoding/decoding over network
+3. **Step 3**: Server Network Integration - Integrate network communication into server event loop
+4. **Step 4**: Client-Server Network Integration - Connect client operations to distributed Raft cluster
+5. **Step 5**: Multi-Node Cluster Testing - Test actual distributed consensus over network
 
 ## Evolution of Project Decisions
 
