@@ -23,6 +23,9 @@ pub mod storage;
 pub mod network;
 pub mod kv;
 
+#[cfg(test)]
+pub mod tests;
+
 // Re-export commonly used types
 pub use raft::{RaftNode, RaftState};
 pub use storage::{LogStorage, StateStorage};
@@ -92,7 +95,7 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests {
+mod unit_tests {
     use super::*;
 
     #[test]

@@ -106,6 +106,10 @@ pub struct MockTransport {
     sent_messages: Arc<Mutex<Vec<(NodeId, Vec<u8>)>>>,
     /// Connected nodes
     connected_nodes: Arc<Mutex<Vec<NodeId>>>,
+    /// Whether this transport is isolated (for partition simulation)
+    isolated: Arc<Mutex<bool>>,
+    /// Whether this transport has failed (for failure simulation)
+    failed: Arc<Mutex<bool>>,
 }
 
 impl MockTransport {
@@ -116,6 +120,8 @@ impl MockTransport {
             incoming_messages: Arc::new(Mutex::new(Vec::new())),
             sent_messages: Arc::new(Mutex::new(Vec::new())),
             connected_nodes: Arc::new(Mutex::new(Vec::new())),
+            isolated: Arc::new(Mutex::new(false)),
+            failed: Arc::new(Mutex::new(false)),
         }
     }
     
@@ -137,6 +143,33 @@ impl MockTransport {
     /// Set connected nodes
     pub fn set_connected_nodes(&self, nodes: Vec<NodeId>) {
         *self.connected_nodes.lock().unwrap() = nodes;
+    }
+    
+    /// Set isolation status (for network partition simulation)
+    pub fn set_isolated(&self, isolated: bool) {
+        *self.isolated.lock().unwrap() = isolated;
+    }
+    
+    /// Check if this transport is isolated
+    pub fn is_isolated(&self) -> bool {
+        *self.isolated.lock().unwrap()
+    }
+    
+    /// Set failure status (for node failure simulation)
+    pub fn set_failed(&self, failed: bool) {
+        *self.failed.lock().unwrap() = failed;
+    }
+    
+    /// Check if this transport has failed
+    pub fn is_failed(&self) -> bool {
+        *self.failed.lock().unwrap()
+    }
+    
+    /// Get pending messages (for integration testing)
+    pub fn get_pending_messages(&self) -> Vec<(NodeId, Vec<u8>)> {
+        let messages = self.sent_messages.lock().unwrap().clone();
+        self.sent_messages.lock().unwrap().clear();
+        messages
     }
 }
 
