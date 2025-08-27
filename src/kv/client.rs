@@ -84,6 +84,13 @@ impl KVClient {
         self.node_id
     }
     
+    /// List all keys
+    pub fn list_keys(&self) -> Result<Vec<String>> {
+        // Stub implementation - in real implementation would send request to Raft node
+        // For now, return empty list
+        Ok(Vec::new())
+    }
+    
     /// Get the client configuration
     pub fn config(&self) -> &ClientConfig {
         &self.config
