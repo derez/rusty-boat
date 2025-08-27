@@ -58,7 +58,7 @@ impl TcpTransport {
         listener.set_nonblocking(true)
             .map_err(|e| Error::Network(format!("Failed to set non-blocking mode: {}", e)))?;
         
-        println!("TCP transport: listening on {} for node {}", bind_addr, node_id);
+        log::info!("TCP transport: listening on {} for node {}", bind_addr, node_id);
         
         Ok(Self {
             config,
@@ -79,12 +79,12 @@ impl TcpTransport {
             let node_id = self.node_id;
             
             thread::spawn(move || {
-                println!("TCP transport: started listener thread for node {}", node_id);
+                log::debug!("TCP transport: started listener thread for node {}", node_id);
                 
                 loop {
                     match listener_clone.accept() {
                         Ok((mut stream, addr)) => {
-                            println!("TCP transport: accepted connection from {}", addr);
+                            log::info!("TCP transport: accepted connection from {}", addr);
                             
                             // Handle connection in a separate thread
                             let incoming_messages_clone = Arc::clone(&incoming_messages);
@@ -97,7 +97,7 @@ impl TcpTransport {
                             thread::sleep(Duration::from_millis(10));
                         }
                         Err(e) => {
-                            eprintln!("TCP transport: error accepting connection: {}", e);
+                            log::error!("TCP transport: error accepting connection: {}", e);
                             thread::sleep(Duration::from_millis(100));
                         }
                     }
@@ -114,11 +114,11 @@ impl TcpTransport {
         incoming_messages: Arc<Mutex<Vec<(NodeId, Vec<u8>)>>>,
         node_id: NodeId
     ) {
-        println!("TCP transport: handling connection for node {}", node_id);
+        log::debug!("TCP transport: handling connection for node {}", node_id);
         
         // Set stream to blocking mode for easier message parsing
         stream.set_nonblocking(false).unwrap_or_else(|e| {
-            eprintln!("TCP transport: failed to set blocking mode: {}", e);
+            log::error!("TCP transport: failed to set blocking mode: {}", e);
         });
         
         let mut reader = BufReader::new(stream);
@@ -140,7 +140,7 @@ impl TcpTransport {
                     
                     // Validate message length (prevent excessive memory allocation)
                     if message_len > 1024 * 1024 { // 1MB limit
-                        eprintln!("TCP transport: message too large ({} bytes), closing connection", message_len);
+                        log::warn!("TCP transport: message too large ({} bytes), closing connection", message_len);
                         break;
                     }
                     
@@ -150,40 +150,40 @@ impl TcpTransport {
                     
                     match reader.read_exact(&mut message_buffer) {
                         Ok(()) => {
-                            println!("TCP transport: received complete message from node {} ({} bytes)", 
+                            log::debug!("TCP transport: received complete message from node {} ({} bytes)",
                                        sender_id, message_len);
                             
                             // Add to incoming message queue
                             incoming_messages.lock().unwrap().push((sender_id, message_buffer.clone()));
                         }
                         Err(e) => {
-                            eprintln!("TCP transport: error reading message data: {}", e);
+                            log::error!("TCP transport: error reading message data: {}", e);
                             break;
                         }
                     }
                 }
                 Err(e) => {
                     if e.kind() == std::io::ErrorKind::UnexpectedEof {
-                        println!("TCP transport: connection closed by peer");
+                        log::info!("TCP transport: connection closed by peer");
                     } else {
-                        eprintln!("TCP transport: error reading message header: {}", e);
+                        log::error!("TCP transport: error reading message header: {}", e);
                     }
                     break;
                 }
             }
         }
         
-        println!("TCP transport: connection handler exiting for node {}", node_id);
+        log::debug!("TCP transport: connection handler exiting for node {}", node_id);
     }
 }
 
 impl NetworkTransport for TcpTransport {
     fn send_message(&self, to: NodeId, message: Vec<u8>) -> Result<()> {
-        println!("TCP transport: attempting to send {} byte message to node {}", message.len(), to);
+        log::debug!("TCP transport: attempting to send {} byte message to node {}", message.len(), to);
         
         // Get target address from cluster configuration
         if let Some(node_address) = self.config.cluster_addresses.get(&to) {
-            println!("TCP transport: sending message to node {} at address {}", to, node_address.socket_addr());
+            log::debug!("TCP transport: sending message to node {} at address {}", to, node_address.socket_addr());
             
             // Connect to target node
             let addr: SocketAddr = node_address.socket_addr().parse()
@@ -215,10 +215,10 @@ impl NetworkTransport for TcpTransport {
             writer.flush()
                 .map_err(|e| Error::Network(format!("Failed to flush message: {}", e)))?;
             
-            println!("TCP transport: successfully sent {} byte framed message to node {}", message.len(), to);
+            log::debug!("TCP transport: successfully sent {} byte framed message to node {}", message.len(), to);
             Ok(())
         } else {
-            eprintln!("TCP transport: node {} address not found in cluster configuration", to);
+            log::error!("TCP transport: node {} address not found in cluster configuration", to);
             Err(Error::Network(format!("Node {} address not found", to)))
         }
     }
@@ -230,7 +230,7 @@ impl NetworkTransport for TcpTransport {
         incoming.clear();
         
         if !messages.is_empty() {
-            println!("TCP transport: delivering {} incoming messages", messages.len());
+            log::debug!("TCP transport: delivering {} incoming messages", messages.len());
         }
         
         messages

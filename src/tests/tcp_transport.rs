@@ -71,7 +71,7 @@ fn test_tcp_transport_raft_message_communication() {
     let received_message = RaftMessage::from_bytes(received_bytes).unwrap();
     assert_eq!(received_message, raft_message, "Message content mismatch");
     
-    println!("TCP transport: successfully sent and received RaftMessage");
+    log::info!("TCP transport: successfully sent and received RaftMessage");
 }
 
 /// Test TCP transport with AppendEntries message containing log entries
@@ -107,7 +107,7 @@ fn test_tcp_transport_append_entries_communication() {
     let raft_message = RaftMessage::AppendEntries(append_request);
     let message_bytes = raft_message.to_bytes();
     
-    println!("TCP transport: sending AppendEntries message ({} bytes)", message_bytes.len());
+    log::info!("TCP transport: sending AppendEntries message ({} bytes)", message_bytes.len());
     
     // Send message from node 1 to node 2
     let send_result = transport1.send_message(2, message_bytes.clone());
@@ -136,7 +136,7 @@ fn test_tcp_transport_append_entries_communication() {
         panic!("Expected AppendEntries message");
     }
     
-    println!("TCP transport: successfully sent and received AppendEntries with log entries");
+    log::info!("TCP transport: successfully sent and received AppendEntries with log entries");
 }
 
 /// Test TCP transport bidirectional communication
@@ -198,7 +198,7 @@ fn test_tcp_transport_bidirectional_communication() {
     let received_message = RaftMessage::from_bytes(received_bytes).unwrap();
     assert_eq!(received_message, message2to1, "Message 2->1 content mismatch");
     
-    println!("TCP transport: successfully completed bidirectional communication");
+    log::info!("TCP transport: successfully completed bidirectional communication");
 }
 
 /// Test TCP transport error handling for invalid addresses
@@ -222,7 +222,7 @@ fn test_tcp_transport_error_handling() {
     // Should fail because node 2 is not listening
     assert!(send_result.is_err(), "Expected send to fail, but it succeeded");
     
-    println!("TCP transport: correctly handled connection error");
+    log::info!("TCP transport: correctly handled connection error");
 }
 
 /// Test TCP transport with multiple rapid messages
@@ -280,5 +280,5 @@ fn test_tcp_transport_multiple_messages() {
         }
     }
     
-    println!("TCP transport: successfully sent and received {} messages", message_count);
+    log::info!("TCP transport: successfully sent and received {} messages", message_count);
 }

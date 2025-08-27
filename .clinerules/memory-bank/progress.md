@@ -344,7 +344,35 @@
 - [x] Test node failure and recovery
 - [x] Validate data consistency in distributed environment
 
-### Phase 5: Production Features (Not Started)
+### Phase 5: Production Features (IN PROGRESS)
+
+#### Phase 5 Step 1: Logging System Implementation (COMPLETED ✅) - Session 2025-08-27
+- **Comprehensive Logging Infrastructure**: Complete logging system with proper Rust logging crates
+  - Added `log = "0.4"` and `env_logger = "0.11"` dependencies to Cargo.toml
+  - Replaced all 102 print statements across the codebase with appropriate log levels
+  - Application-wide logging configuration with environment variable support
+- **CLI --verbose Flag Implementation**: User-friendly logging control
+  - Added `--verbose` and `-v` flag support to CLI argument parsing
+  - Default logging level: WARN (production-friendly, minimal output)
+  - Verbose logging level: DEBUG (comprehensive development information)
+  - Updated help system to document --verbose flag usage
+- **Systematic Print Statement Replacement**: Complete migration from print to logging
+  - **src/main.rs**: Replaced 71 print statements with log::info!, log::warn!, log::error!, log::debug!
+  - **src/network/transport.rs**: Replaced 17 print statements with appropriate log levels
+  - **src/raft/node.rs**: Replaced 8 print statements with log::trace!, log::info!, log::debug!
+  - **src/tests/tcp_transport.rs**: Replaced 6 print statements with log::info!
+- **Production-Ready Logging Configuration**: Robust logging setup for distributed system
+  - Environment variable configuration: `RUST_LOG=kvapp_c=warn` (default) or `RUST_LOG=kvapp_c=debug` (verbose)
+  - Proper log level hierarchy: ERROR > WARN > INFO > DEBUG > TRACE
+  - Clean separation between user-facing output and diagnostic logging
+  - Thread-safe logging suitable for distributed multi-node operation
+- **Quality Assurance**: Maintained system stability and functionality
+  - All 103 tests continue passing (100% pass rate maintained)
+  - Clean compilation with resolved unsafe function call issues
+  - No functional regressions in CLI or distributed operations
+  - Enhanced debugging capabilities for development and troubleshooting
+
+#### Remaining Phase 5 Features (Future)
 - [ ] **Cluster Membership**
   - Dynamic node addition and removal
   - Configuration change consensus
@@ -355,8 +383,8 @@
   - Batch processing for efficiency
   - Network optimization and compression
 
-- [ ] **Production Features**
-  - Comprehensive logging and metrics
+- [ ] **Additional Production Features**
+  - Metrics collection and monitoring
   - Configuration file support
   - Graceful shutdown with Ctrl+C handling
   - Enhanced error recovery

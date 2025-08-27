@@ -83,16 +83,31 @@ pub type Term = u64;
 pub type LogIndex = u64;
 
 fn main() {
+    // Parse command line arguments first to check for --verbose
+    let args: Vec<String> = std::env::args().collect();
+    
+    // Check for --verbose flag in any position
+    let verbose = args.iter().any(|arg| arg == "--verbose" || arg == "-v");
+    
     // Initialize logging
-    unsafe {
-        std::env::set_var("RUST_LOG", "debug");
+    if std::env::var("RUST_LOG").is_err() {
+        let log_level = if verbose {
+            "kvapp_c=debug"
+        } else {
+            "kvapp_c=warn"
+        };
+        
+        unsafe {
+            std::env::set_var("RUST_LOG", log_level);
+        }
     }
     env_logger::init();
     
-    log::info!("Starting kvapp-c: Raft-based distributed key-value store");
+    if verbose {
+        log::debug!("Verbose logging enabled");
+    }
     
-    // Parse command line arguments
-    let args: Vec<String> = std::env::args().collect();
+    log::info!("Starting kvapp-c: Raft-based distributed key-value store");
     
     if args.len() < 2 {
         print_usage(&args[0]);
@@ -101,13 +116,13 @@ fn main() {
     
     match args[1].as_str() {
         "server" => {
-            if let Err(e) = run_server(&args[2..]) {
+            if let Err(e) = run_server(&args[2..], verbose) {
                 log::error!("Server error: {}", e);
                 std::process::exit(1);
             }
         }
         "client" => {
-            if let Err(e) = run_client(&args[2..]) {
+            if let Err(e) = run_client(&args[2..], verbose) {
                 log::error!("Client error: {}", e);
                 std::process::exit(1);
             }
@@ -121,8 +136,8 @@ fn main() {
 
 fn print_usage(program_name: &str) {
     println!("Usage:");
-    println!("  {} server --node-id <id> --bind <host:port> --cluster <node1:port1,node2:port2,...> [--data-dir <path>]", program_name);
-    println!("  {} client --cluster <node1:port1,node2:port2,...>", program_name);
+    println!("  {} server --node-id <id> --bind <host:port> --cluster <node1:port1,node2:port2,...> [--data-dir <path>] [--verbose]", program_name);
+    println!("  {} client --cluster <node1:port1,node2:port2,...> [--verbose]", program_name);
     println!();
     println!("Server mode:");
     println!("  --node-id <id>     Unique node identifier (0, 1, 2, ...)");
@@ -133,12 +148,15 @@ fn print_usage(program_name: &str) {
     println!("Client mode:");
     println!("  --cluster <nodes>  Comma-separated list of cluster nodes to connect to");
     println!();
+    println!("Global options:");
+    println!("  --verbose, -v      Enable debug logging");
+    println!();
     println!("Examples:");
     println!("  {} server --node-id 0 --bind localhost:8080 --cluster localhost:8080,localhost:8081,localhost:8082", program_name);
-    println!("  {} client --cluster localhost:8080,localhost:8081,localhost:8082", program_name);
+    println!("  {} client --cluster localhost:8080,localhost:8081,localhost:8082 --verbose", program_name);
 }
 
-fn run_server(args: &[String]) -> Result<()> {
+fn run_server(args: &[String], verbose: bool) -> Result<()> {
     let config = parse_server_args(args)?;
     
     log::info!("Starting server with node ID {} on {}", config.node_id, config.bind_address);
@@ -221,7 +239,7 @@ fn run_server(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn run_client(args: &[String]) -> Result<()> {
+fn run_client(args: &[String], verbose: bool) -> Result<()> {
     let config = parse_client_args(args)?;
     
     log::info!("Starting client, connecting to cluster: {:?}", config.cluster_addresses);
@@ -229,6 +247,7 @@ fn run_client(args: &[String]) -> Result<()> {
     // Initialize KV client (using first node for now)
     let client = kv::KVClient::new(0);
     
+    log::info!("Connected to kvapp-c cluster");
     println!("Connected to kvapp-c cluster");
     println!("Type 'help' for available commands, 'quit' to exit");
     
@@ -297,6 +316,7 @@ fn run_client_loop(mut client: kv::KVClient) -> Result<()> {
                 
                 match input {
                     "quit" | "exit" => {
+                        log::info!("Client session ending");
                         println!("Goodbye!");
                         break;
                     }
@@ -305,12 +325,14 @@ fn run_client_loop(mut client: kv::KVClient) -> Result<()> {
                     }
                     _ => {
                         if let Err(e) = process_client_command(&mut client, input) {
+                            log::error!("Client command error: {}", e);
                             println!("Error: {}", e);
                         }
                     }
                 }
             }
             Err(e) => {
+                log::error!("Error reading input: {}", e);
                 println!("Error reading input: {}", e);
                 break;
             }
@@ -344,14 +366,19 @@ fn process_client_command(client: &mut kv::KVClient, input: &str) -> Result<()> 
             }
             
             let key = parts[1];
+            log::debug!("Client executing GET command for key: {}", key);
             match client.get(key.to_string())? {
                 Some(value) => {
+                    log::debug!("GET command successful for key: {}", key);
                     match String::from_utf8(value.clone()) {
                         Ok(s) => println!("{}", s),
                         Err(_) => println!("{:?}", value),
                     }
                 }
-                None => println!("Key not found"),
+                None => {
+                    log::debug!("GET command: key not found: {}", key);
+                    println!("Key not found");
+                }
             }
         }
         "put" => {
@@ -362,7 +389,9 @@ fn process_client_command(client: &mut kv::KVClient, input: &str) -> Result<()> 
             
             let key = parts[1];
             let value = parts[2..].join(" ");
+            log::debug!("Client executing PUT command for key: {}", key);
             client.put(key.to_string(), value.into_bytes())?;
+            log::debug!("PUT command successful for key: {}", key);
             println!("OK");
         }
         "delete" => {
@@ -372,14 +401,19 @@ fn process_client_command(client: &mut kv::KVClient, input: &str) -> Result<()> 
             }
             
             let key = parts[1];
+            log::debug!("Client executing DELETE command for key: {}", key);
             if client.delete(key.to_string())? {
+                log::debug!("DELETE command successful for key: {}", key);
                 println!("OK");
             } else {
+                log::debug!("DELETE command: key not found: {}", key);
                 println!("Key not found");
             }
         }
         "list" => {
+            log::debug!("Client executing LIST command");
             let keys = client.list_keys()?;
+            log::debug!("LIST command returned {} keys", keys.len());
             if keys.is_empty() {
                 println!("No keys found");
             } else {
@@ -389,6 +423,7 @@ fn process_client_command(client: &mut kv::KVClient, input: &str) -> Result<()> 
             }
         }
         _ => {
+            log::debug!("Client received unknown command: {}", parts[0]);
             println!("Unknown command: {}. Type 'help' for available commands.", parts[0]);
         }
     }
@@ -521,6 +556,10 @@ fn parse_server_args(args: &[String]) -> Result<ServerConfig> {
                 data_dir = args[i + 1].clone();
                 i += 2;
             }
+            "--verbose" | "-v" => {
+                // Skip verbose flag, already handled in main
+                i += 1;
+            }
             _ => {
                 return Err(Error::Raft(format!("Unknown argument: {}", args[i])));
             }
@@ -553,6 +592,10 @@ fn parse_client_args(args: &[String]) -> Result<ClientConfig> {
                 }
                 cluster_spec = Some(args[i + 1].clone());
                 i += 2;
+            }
+            "--verbose" | "-v" => {
+                // Skip verbose flag, already handled in main
+                i += 1;
             }
             _ => {
                 return Err(Error::Raft(format!("Unknown argument: {}", args[i])));

@@ -759,7 +759,7 @@ impl RaftNode {
             
             let majority = (self.config.cluster_nodes.len() / 2) + 1;
             
-            println!("Node {} checking commit for index {}: {} replicated out of {} nodes (need {})",
+            log::trace!("Node {} checking commit for index {}: {} replicated out of {} nodes (need {})",
                 self.config.node_id, index, replicated_count, self.config.cluster_nodes.len(), majority
             );
             
@@ -771,29 +771,29 @@ impl RaftNode {
                     None
                 };
                 
-                println!("Entry {} has term {:?}, current_term={}", index, entry_term, current_term);
+                log::trace!("Entry {} has term {:?}, current_term={}", index, entry_term, current_term);
                 
                 if let Some(term) = entry_term {
                     if term == current_term {
                         self.commit_index = index;
-                        println!("Node {} advanced commit_index to {} (replicated on {} nodes)",
+                        log::info!("Node {} advanced commit_index to {} (replicated on {} nodes)",
                             self.config.node_id, index, replicated_count
                         );
                         
                         // Apply newly committed entries
                         self.apply_committed_entries()?;
                     } else {
-                        println!("Node {} cannot commit index {} from term {} (current term {})",
+                        log::debug!("Node {} cannot commit index {} from term {} (current term {})",
                             self.config.node_id, index, term, current_term
                         );
                     }
                 } else {
-                    println!("Node {} cannot find entry at index {} for commit check",
+                    log::warn!("Node {} cannot find entry at index {} for commit check",
                         self.config.node_id, index
                     );
                 }
             } else {
-                println!("Not enough replicas for index {}: {} < {}", index, replicated_count, majority);
+                log::trace!("Not enough replicas for index {}: {} < {}", index, replicated_count, majority);
                 // If this index doesn't have majority, later indices won't either
                 break;
             }
@@ -1574,7 +1574,7 @@ mod tests {
         let config = RaftConfig {
             node_id: 1,
             cluster_nodes: vec![0, 1, 2],
-            election_timeout_ms: (150, 300),
+            election_timeout_ms: (150,300),
             heartbeat_interval_ms: 50,
         };
         
@@ -1740,10 +1740,10 @@ mod tests {
         node.match_index.insert(2, 0); // Follower 2 doesn't have entry 1 yet
         
         // Try to advance commit index
-        println!("Before advance_commit_index: commit_index={}, match_index={:?}, current_term={}", 
+        log::trace!("Before advance_commit_index: commit_index={}, match_index={:?}, current_term={}",
                  node.commit_index, node.match_index, node.current_term);
         node.advance_commit_index().unwrap();
-        println!("After advance_commit_index: commit_index={}, last_applied={}", 
+        log::trace!("After advance_commit_index: commit_index={}, last_applied={}",
                  node.commit_index, node.last_applied);
         
         // Leader + follower 1 = 2 nodes, which is majority for 3 nodes
