@@ -1,0 +1,6 @@
+# Rust build path
+/target/
+
+# Original projectbrief - here to show origin but
+# will have evolved in /memory-bank/projectbrief.md 
+**/original_projectbrief.md

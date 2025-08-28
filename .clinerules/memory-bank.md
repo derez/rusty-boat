@@ -60,7 +60,7 @@ flowchart TD
    - Evolution of project decisions
 
 ### Additional Context
-Create additional files/folders within memory-bank/ when they help organize:
+Suggest the creation of additional files/folders within memory-bank/ when they help organize:
 - Complex feature documentation
 - Integration specifications
 - API documentation
@@ -91,10 +91,9 @@ flowchart TD
 ## Documentation Updates
 
 Memory Bank updates occur when:
-1. Discovering new project patterns
-2. After implementing significant changes
-3. When user requests with **update memory bank** (MUST review ALL files)
-4. When context needs clarification
+1. After implementing significant changes
+2. When user requests with **update memory bank** (MUST review ALL files)
+3. When context needs clarification
 
 flowchart TD
     Start[Update Process]
@@ -110,6 +109,6 @@ flowchart TD
 
     Start --> Process
 
-Note: When triggered by **update memory bank**, I MUST review every memory bank file, even if some don't require updates. Focus particularly on activeContext.md and progress.md as they track current state.
+Note: When triggered by **update memory bank**, I MUST review every memory bank file, even if some don't require updates. Focus particularly on activeContext.md and progress.md as they track current state and ensure that these do not conflict.
 
 REMEMBER: After every memory reset, I begin completely fresh. The Memory Bank is my only link to previous work. It must be maintained with precision and clarity, as my effectiveness depends entirely on its accuracy.
