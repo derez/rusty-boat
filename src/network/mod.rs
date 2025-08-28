@@ -108,6 +108,8 @@ pub enum ClientEvent {
     Put { key: String, value: Vec<u8> },
     /// Delete request
     Delete { key: String },
+    /// List request
+    List,
 }
 
 /// Network message events
