@@ -4,7 +4,7 @@
 //! with both TCP-based and mock implementations for testing.
 
 use crate::{Result, Error, NodeId};
-use super::{NodeAddress, NetworkConfig};
+use super::NetworkConfig;
 use crate::kv::KVStore;
 
 /// Trait for network transport
@@ -143,7 +143,7 @@ impl TcpTransport {
         });
         
         // Clone the stream for writing responses (needed for client requests)
-        let mut write_stream = match stream.try_clone() {
+        let write_stream = match stream.try_clone() {
             Ok(s) => s,
             Err(e) => {
                 log::error!("TCP transport: failed to clone stream: {}", e);
@@ -310,148 +310,7 @@ impl TcpTransport {
         Ok(())
     }
     
-    /// Process client request data that has already been read (STUB VERSION - DEPRECATED)
-    fn process_client_request_data(request_data: &[u8], stream: &mut TcpStream, _node_id: NodeId) -> std::result::Result<(), std::io::Error> {
-        use crate::kv::{KVOperation, KVResponse};
-        
-        log::debug!("TCP transport: processing client request data ({} bytes)", request_data.len());
-        
-        // Deserialize the KV operation
-        let operation = match KVOperation::from_bytes(request_data) {
-            Ok(op) => op,
-            Err(e) => {
-                log::error!("TCP transport: failed to deserialize client operation: {}", e);
-                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid operation"));
-            }
-        };
-        
-        log::debug!("TCP transport: processing client operation: {:?}", operation);
-        
-        log::warn!("TCP transport: using DEPRECATED stub responses - should use process_client_request_with_store instead");
-        
-        // Process the operation (STUB - needs integration with actual KV store)
-        let response = match operation {
-            KVOperation::Get { key } => {
-                // STUB: return empty response (key not found)
-                KVResponse::Get { key, value: None }
-            }
-            KVOperation::Put { key, value: _ } => {
-                // STUB: return success without actually storing
-                KVResponse::Put { key }
-            }
-            KVOperation::Delete { key } => {
-                // STUB: return success without actually deleting
-                KVResponse::Delete { key }
-            }
-            KVOperation::List => {
-                // STUB: return empty list
-                KVResponse::List { keys: vec![] }
-            }
-        };
-        
-        // Serialize the response
-        let response_bytes = match Self::serialize_kv_response(&response) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                log::error!("TCP transport: failed to serialize response: {}", e);
-                return Err(std::io::Error::new(std::io::ErrorKind::Other, "Serialization failed"));
-            }
-        };
-        
-        // Send response header (4 bytes for length)
-        let response_len = response_bytes.len() as u32;
-        let mut writer = BufWriter::new(stream);
-        writer.write_all(&response_len.to_be_bytes())?;
-        
-        // Send response data
-        writer.write_all(&response_bytes)?;
-        writer.flush()?;
-        
-        log::debug!("TCP transport: sent {} byte response to client", response_bytes.len());
-        
-        Ok(())
-    }
     
-    /// Handle a client request (different framing than Raft messages)
-    fn handle_client_request(stream: &mut TcpStream, node_id: NodeId) -> std::result::Result<(), std::io::Error> {
-        use crate::kv::{KVOperation, KVResponse};
-        
-        log::debug!("TCP transport: attempting to handle as client request");
-        
-        let stream_clone = stream.try_clone()?;
-        let mut reader = BufReader::new(stream);
-        let mut writer = BufWriter::new(stream_clone);
-        
-        // Read client request header (4 bytes for length only)
-        let mut header = [0u8; 4];
-        reader.read_exact(&mut header)?;
-        
-        let request_len = u32::from_be_bytes(header) as usize;
-        
-        // Validate request length
-        if request_len > 1024 * 1024 { // 1MB limit
-            log::warn!("TCP transport: client request too large ({} bytes)", request_len);
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Request too large"));
-        }
-        
-        // Read request data
-        let mut request_data = vec![0u8; request_len];
-        reader.read_exact(&mut request_data)?;
-        
-        log::debug!("TCP transport: received {} byte client request", request_len);
-        
-        // Deserialize the KV operation
-        let operation = match KVOperation::from_bytes(&request_data) {
-            Ok(op) => op,
-            Err(e) => {
-                log::error!("TCP transport: failed to deserialize client operation: {}", e);
-                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid operation"));
-            }
-        };
-        
-        log::debug!("TCP transport: processing client operation: {:?}", operation);
-        
-        // Process the operation (simplified - in a full implementation this would go through Raft)
-        let response = match operation {
-            KVOperation::Get { key } => {
-                // For now, return empty response (key not found)
-                KVResponse::Get { key, value: None }
-            }
-            KVOperation::Put { key, value: _ } => {
-                // For now, return success
-                KVResponse::Put { key }
-            }
-            KVOperation::Delete { key } => {
-                // For now, return success
-                KVResponse::Delete { key }
-            }
-            KVOperation::List => {
-                // For now, return empty list
-                KVResponse::List { keys: vec![] }
-            }
-        };
-        
-        // Serialize the response
-        let response_bytes = match Self::serialize_kv_response(&response) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                log::error!("TCP transport: failed to serialize response: {}", e);
-                return Err(std::io::Error::new(std::io::ErrorKind::Other, "Serialization failed"));
-            }
-        };
-        
-        // Send response header (4 bytes for length)
-        let response_len = response_bytes.len() as u32;
-        writer.write_all(&response_len.to_be_bytes())?;
-        
-        // Send response data
-        writer.write_all(&response_bytes)?;
-        writer.flush()?;
-        
-        log::debug!("TCP transport: sent {} byte response to client", response_bytes.len());
-        
-        Ok(())
-    }
     
     /// Serialize a KV response to bytes (copied from main.rs)
     fn serialize_kv_response(response: &crate::kv::KVResponse) -> Result<Vec<u8>> {

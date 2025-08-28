@@ -13,7 +13,7 @@ pub use state::RaftState;
 pub use log::RaftLog;
 pub use messages::{RaftMessage, AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse};
 
-use crate::{Result, NodeId, Term, LogIndex};
+use crate::NodeId;
 
 /// Raft node states
 #[derive(Debug, Clone, PartialEq)]

@@ -150,13 +150,13 @@ impl StateStorage for FileStateStorage {
                 }
             }
         } else {
-            log::trace!("Current term {} unchanged, skipping save", term);
+            log::debug!("Current term {} unchanged, skipping save", term);
             Ok(())
         }
     }
     
     fn get_current_term(&self) -> Term {
-        log::trace!("Retrieved current term: {}", self.state.current_term);
+        log::debug!("Retrieved current term: {}", self.state.current_term);
         self.state.current_term
     }
     
@@ -181,13 +181,13 @@ impl StateStorage for FileStateStorage {
                 }
             }
         } else {
-            log::trace!("Vote {:?} unchanged, skipping save", candidate);
+            log::debug!("Vote {:?} unchanged, skipping save", candidate);
             Ok(())
         }
     }
     
     fn get_voted_for(&self) -> Option<NodeId> {
-        log::trace!("Retrieved voted_for: {:?}", self.state.voted_for);
+        log::debug!("Retrieved voted_for: {:?}", self.state.voted_for);
         self.state.voted_for
     }
     
@@ -250,13 +250,13 @@ impl StateStorage for InMemoryStateStorage {
             log::debug!("In-memory storage: updating current term from {} to {}", old_term, term);
             self.state.current_term = term;
         } else {
-            log::trace!("In-memory storage: current term {} unchanged", term);
+            log::debug!("In-memory storage: current term {} unchanged", term);
         }
         Ok(())
     }
     
     fn get_current_term(&self) -> Term {
-        log::trace!("In-memory storage: retrieved current term: {}", self.state.current_term);
+        log::debug!("In-memory storage: retrieved current term: {}", self.state.current_term);
         self.state.current_term
     }
     
@@ -267,13 +267,13 @@ impl StateStorage for InMemoryStateStorage {
                        old_vote, candidate, self.state.current_term);
             self.state.voted_for = candidate;
         } else {
-            log::trace!("In-memory storage: vote {:?} unchanged", candidate);
+            log::debug!("In-memory storage: vote {:?} unchanged", candidate);
         }
         Ok(())
     }
     
     fn get_voted_for(&self) -> Option<NodeId> {
-        log::trace!("In-memory storage: retrieved voted_for: {:?}", self.state.voted_for);
+        log::debug!("In-memory storage: retrieved voted_for: {:?}", self.state.voted_for);
         self.state.voted_for
     }
     

@@ -12,7 +12,6 @@ use crate::network::transport::NetworkTransport;
 use crate::network::{EventHandler, Event};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use std::sync::{Arc, Mutex};
 
 /// Main Raft node implementation
 pub struct RaftNode {
@@ -759,7 +758,7 @@ impl RaftNode {
             
             let majority = (self.config.cluster_nodes.len() / 2) + 1;
             
-            log::trace!("Node {} checking commit for index {}: {} replicated out of {} nodes (need {})",
+            log::debug!("Node {} checking commit for index {}: {} replicated out of {} nodes (need {})",
                 self.config.node_id, index, replicated_count, self.config.cluster_nodes.len(), majority
             );
             
@@ -771,7 +770,7 @@ impl RaftNode {
                     None
                 };
                 
-                log::trace!("Entry {} has term {:?}, current_term={}", index, entry_term, current_term);
+                log::debug!("Entry {} has term {:?}, current_term={}", index, entry_term, current_term);
                 
                 if let Some(term) = entry_term {
                     if term == current_term {
@@ -793,7 +792,7 @@ impl RaftNode {
                     );
                 }
             } else {
-                log::trace!("Not enough replicas for index {}: {} < {}", index, replicated_count, majority);
+                log::debug!("Not enough replicas for index {}: {} < {}", index, replicated_count, majority);
                 // If this index doesn't have majority, later indices won't either
                 break;
             }
@@ -1740,10 +1739,10 @@ mod tests {
         node.match_index.insert(2, 0); // Follower 2 doesn't have entry 1 yet
         
         // Try to advance commit index
-        log::trace!("Before advance_commit_index: commit_index={}, match_index={:?}, current_term={}",
+        log::debug!("Before advance_commit_index: commit_index={}, match_index={:?}, current_term={}",
                  node.commit_index, node.match_index, node.current_term);
         node.advance_commit_index().unwrap();
-        log::trace!("After advance_commit_index: commit_index={}, last_applied={}",
+        log::debug!("After advance_commit_index: commit_index={}, last_applied={}",
                  node.commit_index, node.last_applied);
         
         // Leader + follower 1 = 2 nodes, which is majority for 3 nodes

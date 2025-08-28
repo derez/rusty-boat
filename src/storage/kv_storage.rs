@@ -162,7 +162,7 @@ impl KVStorage for FileKVStorage {
         let value = self.data.get(key).cloned();
         match &value {
             Some(v) => log::debug!("File KV storage: retrieved key '{}' with {} bytes", key, v.len()),
-            None => log::trace!("File KV storage: key '{}' not found", key),
+            None => log::debug!("File KV storage: key '{}' not found", key),
         }
         value
     }
@@ -177,7 +177,7 @@ impl KVStorage for FileKVStorage {
                 log::debug!("File KV storage: successfully wrote key '{}' to file", key);
                 // Then update in-memory cache
                 self.data.insert(key.clone(), value);
-                log::trace!("File KV storage: updated in-memory cache for key '{}'", key);
+                log::debug!("File KV storage: updated in-memory cache for key '{}'", key);
             }
             Err(e) => {
                 log::error!("File KV storage: failed to write key '{}' to file {:?}: {}", 
@@ -207,32 +207,32 @@ impl KVStorage for FileKVStorage {
             log::debug!("File KV storage: removed key '{}' from in-memory cache", key);
             removed
         } else {
-            log::trace!("File KV storage: attempted to delete non-existent key '{}'", key);
+            log::debug!("File KV storage: attempted to delete non-existent key '{}'", key);
             false
         }
     }
     
     fn keys(&self) -> Vec<String> {
         let keys = self.data.keys().cloned().collect::<Vec<_>>();
-        log::trace!("File KV storage: retrieved {} keys", keys.len());
+        log::debug!("File KV storage: retrieved {} keys", keys.len());
         keys
     }
     
     fn contains_key(&self, key: &str) -> bool {
         let exists = self.data.contains_key(key);
-        log::trace!("File KV storage: key '{}' exists: {}", key, exists);
+        log::debug!("File KV storage: key '{}' exists: {}", key, exists);
         exists
     }
     
     fn len(&self) -> usize {
         let count = self.data.len();
-        log::trace!("File KV storage: contains {} key-value pairs", count);
+        log::debug!("File KV storage: contains {} key-value pairs", count);
         count
     }
     
     fn is_empty(&self) -> bool {
         let empty = self.data.is_empty();
-        log::trace!("File KV storage: is empty: {}", empty);
+        log::debug!("File KV storage: is empty: {}", empty);
         empty
     }
     
@@ -274,7 +274,7 @@ impl KVStorage for InMemoryKVStorage {
         let value = self.data.get(key).cloned();
         match &value {
             Some(v) => log::debug!("In-memory KV storage: retrieved key '{}' with {} bytes", key, v.len()),
-            None => log::trace!("In-memory KV storage: key '{}' not found", key),
+            None => log::debug!("In-memory KV storage: key '{}' not found", key),
         }
         value
     }
@@ -282,7 +282,7 @@ impl KVStorage for InMemoryKVStorage {
     fn put(&mut self, key: String, value: Vec<u8>) {
         log::info!("In-memory KV storage: storing key '{}' with {} bytes", key, value.len());
         self.data.insert(key.clone(), value);
-        log::trace!("In-memory KV storage: successfully stored key '{}'", key);
+        log::debug!("In-memory KV storage: successfully stored key '{}'", key);
     }
     
     fn delete(&mut self, key: &str) -> bool {
@@ -291,7 +291,7 @@ impl KVStorage for InMemoryKVStorage {
         if removed {
             log::info!("In-memory KV storage: deleted key '{}'", key);
         } else {
-            log::trace!("In-memory KV storage: attempted to delete non-existent key '{}'", key);
+            log::debug!("In-memory KV storage: attempted to delete non-existent key '{}'", key);
         }
         
         removed
@@ -299,25 +299,25 @@ impl KVStorage for InMemoryKVStorage {
     
     fn keys(&self) -> Vec<String> {
         let keys = self.data.keys().cloned().collect::<Vec<_>>();
-        log::trace!("In-memory KV storage: retrieved {} keys", keys.len());
+        log::debug!("In-memory KV storage: retrieved {} keys", keys.len());
         keys
     }
     
     fn contains_key(&self, key: &str) -> bool {
         let exists = self.data.contains_key(key);
-        log::trace!("In-memory KV storage: key '{}' exists: {}", key, exists);
+        log::debug!("In-memory KV storage: key '{}' exists: {}", key, exists);
         exists
     }
     
     fn len(&self) -> usize {
         let count = self.data.len();
-        log::trace!("In-memory KV storage: contains {} key-value pairs", count);
+        log::debug!("In-memory KV storage: contains {} key-value pairs", count);
         count
     }
     
     fn is_empty(&self) -> bool {
         let empty = self.data.is_empty();
-        log::trace!("In-memory KV storage: is empty: {}", empty);
+        log::debug!("In-memory KV storage: is empty: {}", empty);
         empty
     }
     

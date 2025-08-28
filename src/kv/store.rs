@@ -48,7 +48,7 @@ impl KVStore for InMemoryKVStore {
         match operation {
             KVOperation::Get { ref key } => {
                 let value = storage.get(key);
-                log::trace!("GET operation for key '{}': {:?}", key, value.is_some());
+                log::debug!("GET operation for key '{}': {:?}", key, value.is_some());
                 Ok(KVResponse::Get { key: key.clone(), value })
             }
             KVOperation::Put { ref key, ref value } => {
@@ -64,7 +64,7 @@ impl KVStore for InMemoryKVStore {
             }
             KVOperation::List => {
                 let keys = storage.keys();
-                log::trace!("LIST operation: found {} keys", keys.len());
+                log::debug!("LIST operation: found {} keys", keys.len());
                 Ok(KVResponse::List { keys })
             }
         }

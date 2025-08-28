@@ -28,7 +28,7 @@ pub trait LogStorage: Send + Sync {
 }
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -221,7 +221,7 @@ impl LogStorage for InMemoryLogStorage {
     fn append_entries(&mut self, entries: Vec<LogEntry>) -> Result<()> {
         log::debug!("Appending {} entries to in-memory log storage", entries.len());
         for entry in entries {
-            log::trace!("Appending entry: index={}, term={}", entry.index, entry.term);
+            log::debug!("Appending entry: index={}, term={}", entry.index, entry.term);
             self.entries.insert(entry.index, entry);
         }
         log::debug!("Log storage now contains {} entries", self.entries.len());

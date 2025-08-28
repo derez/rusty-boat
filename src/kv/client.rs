@@ -124,9 +124,9 @@ impl KVClient {
     
     /// Send a request to the server and get response
     fn send_request(&self, operation: KVOperation) -> Result<KVResponse> {
-        use std::net::TcpStream;
-        use std::io::{Read, Write, BufReader, BufWriter};
-        use std::time::Duration;
+        
+        
+        
         
         log::debug!("Sending KV request: {:?}", operation);
         

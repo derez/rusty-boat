@@ -11,7 +11,7 @@ pub use log_storage::{LogStorage, FileLogStorage, InMemoryLogStorage};
 pub use state_storage::{StateStorage, FileStateStorage, InMemoryStateStorage};
 pub use kv_storage::{KVStorage, FileKVStorage, InMemoryKVStorage};
 
-use crate::{Result, NodeId, Term, LogIndex};
+use crate::{NodeId, Term, LogIndex};
 
 /// A log entry in the Raft log
 #[derive(Debug, Clone, PartialEq)]

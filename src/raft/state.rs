@@ -3,7 +3,7 @@
 //! This module manages the state of a Raft node including persistent state,
 //! volatile state, and leader-specific state.
 
-use crate::{Result, NodeId, Term, LogIndex};
+use crate::{NodeId, Term, LogIndex};
 use super::NodeState;
 
 /// Raft state manager
