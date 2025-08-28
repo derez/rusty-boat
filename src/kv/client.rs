@@ -41,55 +41,21 @@ impl KVClient {
     /// Create a new KV client with cluster addresses
     /// This is the primary constructor - cluster addresses must be provided
     pub fn with_cluster_addresses(node_id: NodeId, cluster_addresses: Vec<String>) -> Self {
-        // Convert server addresses to client addresses (add 1000 to port for client listener)
-        let client_addresses = cluster_addresses.iter()
-            .map(|addr| {
-                if let Some(colon_pos) = addr.rfind(':') {
-                    let host = &addr[..colon_pos];
-                    if let Ok(port) = addr[colon_pos + 1..].parse::<u16>() {
-                        format!("{}:{}", host, port + 1000)
-                    } else {
-                        // If port parsing fails, this is an invalid address
-                        addr.clone() // Return as-is, will fail during connection
-                    }
-                } else {
-                    // If no port specified, this is an invalid address
-                    addr.clone() // Return as-is, will fail during connection
-                }
-            })
-            .collect();
-            
+        // Use cluster addresses exactly as provided from command line
         Self {
             node_id,
             config: ClientConfig::default(),
-            cluster_addresses: client_addresses,
+            cluster_addresses,
         }
     }
     
     /// Create a new KV client with custom configuration and cluster addresses
     pub fn with_config_and_addresses(node_id: NodeId, config: ClientConfig, cluster_addresses: Vec<String>) -> Self {
-        // Convert server addresses to client addresses (add 1000 to port for client listener)
-        let client_addresses = cluster_addresses.iter()
-            .map(|addr| {
-                if let Some(colon_pos) = addr.rfind(':') {
-                    let host = &addr[..colon_pos];
-                    if let Ok(port) = addr[colon_pos + 1..].parse::<u16>() {
-                        format!("{}:{}", host, port + 1000)
-                    } else {
-                        // If port parsing fails, this is an invalid address
-                        addr.clone() // Return as-is, will fail during connection
-                    }
-                } else {
-                    // If no port specified, this is an invalid address
-                    addr.clone() // Return as-is, will fail during connection
-                }
-            })
-            .collect();
-            
+        // Use cluster addresses exactly as provided from command line
         Self {
             node_id,
             config,
-            cluster_addresses: client_addresses,
+            cluster_addresses,
         }
     }
     
@@ -448,8 +414,8 @@ mod tests {
         assert_eq!(config.max_retries, 3);
         assert_eq!(config.retry_delay_ms, 100);
         
-        // Verify cluster addresses were converted correctly (8080 -> 9080)
-        assert_eq!(client.cluster_addresses, vec!["127.0.0.1:9080".to_string()]);
+        // Verify cluster addresses are used exactly as provided
+        assert_eq!(client.cluster_addresses, vec!["127.0.0.1:8080".to_string()]);
     }
 
     #[test]
@@ -467,8 +433,8 @@ mod tests {
         assert_eq!(client.config().max_retries, 5);
         assert_eq!(client.config().retry_delay_ms, 200);
         
-        // Verify cluster addresses were converted correctly (8080 -> 9080)
-        assert_eq!(client.cluster_addresses, vec!["127.0.0.1:9080".to_string()]);
+        // Verify cluster addresses are used exactly as provided
+        assert_eq!(client.cluster_addresses, vec!["127.0.0.1:8080".to_string()]);
     }
 
     #[test]
@@ -490,21 +456,17 @@ mod tests {
     }
 
     #[test]
-    fn test_kv_client_address_conversion() {
-        // Test various address formats
+    fn test_kv_client_exact_addresses() {
+        // Test that various address formats are used exactly as provided
         let cluster_addresses = vec![
             "127.0.0.1:8080".to_string(),
             "localhost:8081".to_string(),
             "192.168.1.1:8082".to_string(),
         ];
-        let client = KVClient::with_cluster_addresses(1, cluster_addresses);
+        let client = KVClient::with_cluster_addresses(1, cluster_addresses.clone());
         
-        let expected = vec![
-            "127.0.0.1:9080".to_string(),
-            "localhost:9081".to_string(),
-            "192.168.1.1:9082".to_string(),
-        ];
-        assert_eq!(client.cluster_addresses, expected);
+        // Addresses should be used exactly as provided (no port conversion)
+        assert_eq!(client.cluster_addresses, cluster_addresses);
     }
 
     #[test]

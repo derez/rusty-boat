@@ -5,6 +5,7 @@
 
 use crate::{Result, Error, NodeId};
 use super::{NodeAddress, NetworkConfig};
+use crate::kv::KVStore;
 
 /// Trait for network transport
 pub trait NetworkTransport: Send + Sync {
@@ -19,6 +20,9 @@ pub trait NetworkTransport: Send + Sync {
     
     /// Get list of connected nodes
     fn connected_nodes(&self) -> Vec<NodeId>;
+    
+    /// Get as Any for downcasting
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -37,6 +41,8 @@ pub struct TcpTransport {
     connections: Arc<Mutex<HashMap<NodeId, TcpStream>>>,
     /// Incoming message queue
     incoming_messages: Arc<Mutex<Vec<(NodeId, Vec<u8>)>>>,
+    /// Client request queue
+    client_requests: Arc<Mutex<Vec<(std::net::TcpStream, Vec<u8>)>>>,
     /// Node ID of this transport
     node_id: NodeId,
     /// Whether the listener thread is running
@@ -44,6 +50,17 @@ pub struct TcpTransport {
 }
 
 impl TcpTransport {
+    /// Get pending client requests that need to be processed
+    pub fn get_client_requests(&self) -> Vec<(TcpStream, Vec<u8>)> {
+        let mut requests = self.client_requests.lock().unwrap();
+        let mut result = Vec::new();
+        // Move the requests out instead of cloning (TcpStream doesn't implement Clone)
+        while let Some(request) = requests.pop() {
+            result.push(request);
+        }
+        result
+    }
+    
     /// Create a new TCP transport
     pub fn new(config: NetworkConfig, node_id: NodeId, bind_address: &str) -> Result<Self> {
         // Parse bind address
@@ -65,6 +82,7 @@ impl TcpTransport {
             listener: Some(listener),
             connections: Arc::new(Mutex::new(HashMap::new())),
             incoming_messages: Arc::new(Mutex::new(Vec::new())),
+            client_requests: Arc::new(Mutex::new(Vec::new())),
             node_id,
             listener_running: Arc::new(Mutex::new(false)),
         })
@@ -76,6 +94,7 @@ impl TcpTransport {
             let listener_clone = listener.try_clone()
                 .map_err(|e| Error::Network(format!("Failed to clone listener: {}", e)))?;
             let incoming_messages = Arc::clone(&self.incoming_messages);
+            let client_requests = Arc::clone(&self.client_requests);
             let node_id = self.node_id;
             
             thread::spawn(move || {
@@ -88,8 +107,9 @@ impl TcpTransport {
                             
                             // Handle connection in a separate thread
                             let incoming_messages_clone = Arc::clone(&incoming_messages);
+                            let client_requests_clone = Arc::clone(&client_requests);
                             thread::spawn(move || {
-                                Self::handle_connection(&mut stream, incoming_messages_clone, node_id);
+                                Self::handle_connection(&mut stream, incoming_messages_clone, client_requests_clone, node_id);
                             });
                         }
                         Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -112,6 +132,7 @@ impl TcpTransport {
     fn handle_connection(
         stream: &mut TcpStream, 
         incoming_messages: Arc<Mutex<Vec<(NodeId, Vec<u8>)>>>,
+        client_requests: Arc<Mutex<Vec<(TcpStream, Vec<u8>)>>>,
         node_id: NodeId
     ) {
         log::debug!("TCP transport: handling connection for node {}", node_id);
@@ -121,40 +142,81 @@ impl TcpTransport {
             log::error!("TCP transport: failed to set blocking mode: {}", e);
         });
         
+        // Clone the stream for writing responses (needed for client requests)
+        let mut write_stream = match stream.try_clone() {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("TCP transport: failed to clone stream: {}", e);
+                return;
+            }
+        };
+        
         let mut reader = BufReader::new(stream);
         let mut message_buffer = Vec::new();
         
         loop {
-            // Read message header: 4 bytes for message length + 8 bytes for sender node_id
-            let mut header = [0u8; 12];
-            match reader.read_exact(&mut header) {
+            // First, read just the 4-byte length header
+            let mut length_buffer = [0u8; 4];
+            match reader.read_exact(&mut length_buffer) {
                 Ok(()) => {
-                    // Parse message length (first 4 bytes)
-                    let message_len = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
+                    let message_len = u32::from_be_bytes(length_buffer) as usize;
                     
-                    // Parse sender node_id (next 8 bytes)
-                    let sender_id = u64::from_be_bytes([
-                        header[4], header[5], header[6], header[7],
-                        header[8], header[9], header[10], header[11],
-                    ]);
-                    
-                    // Validate message length (prevent excessive memory allocation)
+                    // Validate message length
                     if message_len > 1024 * 1024 { // 1MB limit
                         log::warn!("TCP transport: message too large ({} bytes), closing connection", message_len);
                         break;
                     }
                     
-                    // Read message data
+                    // Read the complete message data
                     message_buffer.clear();
                     message_buffer.resize(message_len, 0);
                     
                     match reader.read_exact(&mut message_buffer) {
                         Ok(()) => {
-                            log::debug!("TCP transport: received complete message from node {} ({} bytes)",
-                                       sender_id, message_len);
+                            log::debug!("TCP transport: received {} byte message", message_len);
                             
-                            // Add to incoming message queue
-                            incoming_messages.lock().unwrap().push((sender_id, message_buffer.clone()));
+                            // Determine message type by checking if it starts with a valid node_id
+                            // Raft messages from send_message() have format: node_id (8 bytes) + raft_message_data
+                            // Client messages have format: kv_operation_data (starts with operation type byte)
+                            
+                            let is_raft_message = if message_buffer.len() >= 8 {
+                                // Check if the first 8 bytes could be a valid node_id
+                                let potential_node_id = u64::from_be_bytes([
+                                    message_buffer[0], message_buffer[1], message_buffer[2], message_buffer[3],
+                                    message_buffer[4], message_buffer[5], message_buffer[6], message_buffer[7]
+                                ]);
+                                
+                                // Raft messages have reasonable node_id values (0-1000) and sufficient length
+                                potential_node_id <= 1000 && message_buffer.len() > 8
+                            } else {
+                                false
+                            };
+                            
+                            if is_raft_message {
+                                // Handle as Raft message
+                                let sender_node_id = u64::from_be_bytes([
+                                    message_buffer[0], message_buffer[1], message_buffer[2], message_buffer[3],
+                                    message_buffer[4], message_buffer[5], message_buffer[6], message_buffer[7]
+                                ]);
+                                
+                                let raft_message_data = message_buffer[8..].to_vec();
+                                
+                                log::debug!("TCP transport: detected Raft message from node {} ({} bytes)", 
+                                           sender_node_id, raft_message_data.len());
+                                
+                                // Add to incoming message queue
+                                incoming_messages.lock().unwrap().push((sender_node_id, raft_message_data));
+                            } else {
+                                // Handle as client request
+                                log::debug!("TCP transport: detected client request ({} bytes)", message_buffer.len());
+                                
+                                // Store the client request for processing by the server event loop
+                                log::debug!("TCP transport: storing client request for server processing");
+                                client_requests.lock().unwrap().push((write_stream.try_clone().unwrap(), message_buffer.clone()));
+                                
+                                // Client requests are one-shot, close connection after queuing
+                                break;
+                            }
                         }
                         Err(e) => {
                             log::error!("TCP transport: error reading message data: {}", e);
@@ -166,7 +228,7 @@ impl TcpTransport {
                     if e.kind() == std::io::ErrorKind::UnexpectedEof {
                         log::info!("TCP transport: connection closed by peer");
                     } else {
-                        log::error!("TCP transport: error reading message header: {}", e);
+                        log::error!("TCP transport: error reading message length: {}", e);
                     }
                     break;
                 }
@@ -174,6 +236,277 @@ impl TcpTransport {
         }
         
         log::debug!("TCP transport: connection handler exiting for node {}", node_id);
+    }
+    
+    /// Process client request data using actual KV store operations
+    pub fn process_client_request_with_store(
+        request_data: &[u8], 
+        stream: &mut TcpStream, 
+        kv_store: &mut crate::kv::InMemoryKVStore,
+        _node_id: NodeId
+    ) -> std::result::Result<(), std::io::Error> {
+        use crate::kv::{KVOperation, KVResponse};
+        
+        log::debug!("TCP transport: processing client request data with actual KV store ({} bytes)", request_data.len());
+        
+        // Deserialize the KV operation
+        let operation = match KVOperation::from_bytes(request_data) {
+            Ok(op) => op,
+            Err(e) => {
+                log::error!("TCP transport: failed to deserialize client operation: {}", e);
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid operation"));
+            }
+        };
+        
+        log::debug!("TCP transport: processing client operation with real KV store: {:?}", operation);
+        
+        // Process the operation using the actual KV store
+        let response = match operation {
+            KVOperation::Get { key } => {
+                log::debug!("Processing GET operation for key: {}", key);
+                let value = kv_store.get(&key);
+                KVResponse::Get { key, value }
+            }
+            KVOperation::Put { key, value } => {
+                log::debug!("Processing PUT operation for key: {}", key);
+                kv_store.put(key.clone(), value);
+                log::debug!("PUT operation completed for key: {}", key);
+                KVResponse::Put { key }
+            }
+            KVOperation::Delete { key } => {
+                log::debug!("Processing DELETE operation for key: {}", key);
+                let _existed = kv_store.delete(&key);
+                log::debug!("DELETE operation completed for key: {}", key);
+                KVResponse::Delete { key }
+            }
+            KVOperation::List => {
+                log::debug!("Processing LIST operation");
+                let keys = kv_store.list_keys();
+                log::debug!("LIST operation completed, found {} keys", keys.len());
+                KVResponse::List { keys }
+            }
+        };
+        
+        // Serialize the response
+        let response_bytes = match Self::serialize_kv_response(&response) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                log::error!("TCP transport: failed to serialize response: {}", e);
+                return Err(std::io::Error::new(std::io::ErrorKind::Other, "Serialization failed"));
+            }
+        };
+        
+        // Send response header (4 bytes for length)
+        let response_len = response_bytes.len() as u32;
+        let mut writer = BufWriter::new(stream);
+        writer.write_all(&response_len.to_be_bytes())?;
+        
+        // Send response data
+        writer.write_all(&response_bytes)?;
+        writer.flush()?;
+        
+        log::debug!("TCP transport: sent {} byte response to client using actual KV store", response_bytes.len());
+        
+        Ok(())
+    }
+    
+    /// Process client request data that has already been read (STUB VERSION - DEPRECATED)
+    fn process_client_request_data(request_data: &[u8], stream: &mut TcpStream, _node_id: NodeId) -> std::result::Result<(), std::io::Error> {
+        use crate::kv::{KVOperation, KVResponse};
+        
+        log::debug!("TCP transport: processing client request data ({} bytes)", request_data.len());
+        
+        // Deserialize the KV operation
+        let operation = match KVOperation::from_bytes(request_data) {
+            Ok(op) => op,
+            Err(e) => {
+                log::error!("TCP transport: failed to deserialize client operation: {}", e);
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid operation"));
+            }
+        };
+        
+        log::debug!("TCP transport: processing client operation: {:?}", operation);
+        
+        log::warn!("TCP transport: using DEPRECATED stub responses - should use process_client_request_with_store instead");
+        
+        // Process the operation (STUB - needs integration with actual KV store)
+        let response = match operation {
+            KVOperation::Get { key } => {
+                // STUB: return empty response (key not found)
+                KVResponse::Get { key, value: None }
+            }
+            KVOperation::Put { key, value: _ } => {
+                // STUB: return success without actually storing
+                KVResponse::Put { key }
+            }
+            KVOperation::Delete { key } => {
+                // STUB: return success without actually deleting
+                KVResponse::Delete { key }
+            }
+            KVOperation::List => {
+                // STUB: return empty list
+                KVResponse::List { keys: vec![] }
+            }
+        };
+        
+        // Serialize the response
+        let response_bytes = match Self::serialize_kv_response(&response) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                log::error!("TCP transport: failed to serialize response: {}", e);
+                return Err(std::io::Error::new(std::io::ErrorKind::Other, "Serialization failed"));
+            }
+        };
+        
+        // Send response header (4 bytes for length)
+        let response_len = response_bytes.len() as u32;
+        let mut writer = BufWriter::new(stream);
+        writer.write_all(&response_len.to_be_bytes())?;
+        
+        // Send response data
+        writer.write_all(&response_bytes)?;
+        writer.flush()?;
+        
+        log::debug!("TCP transport: sent {} byte response to client", response_bytes.len());
+        
+        Ok(())
+    }
+    
+    /// Handle a client request (different framing than Raft messages)
+    fn handle_client_request(stream: &mut TcpStream, node_id: NodeId) -> std::result::Result<(), std::io::Error> {
+        use crate::kv::{KVOperation, KVResponse};
+        
+        log::debug!("TCP transport: attempting to handle as client request");
+        
+        let stream_clone = stream.try_clone()?;
+        let mut reader = BufReader::new(stream);
+        let mut writer = BufWriter::new(stream_clone);
+        
+        // Read client request header (4 bytes for length only)
+        let mut header = [0u8; 4];
+        reader.read_exact(&mut header)?;
+        
+        let request_len = u32::from_be_bytes(header) as usize;
+        
+        // Validate request length
+        if request_len > 1024 * 1024 { // 1MB limit
+            log::warn!("TCP transport: client request too large ({} bytes)", request_len);
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Request too large"));
+        }
+        
+        // Read request data
+        let mut request_data = vec![0u8; request_len];
+        reader.read_exact(&mut request_data)?;
+        
+        log::debug!("TCP transport: received {} byte client request", request_len);
+        
+        // Deserialize the KV operation
+        let operation = match KVOperation::from_bytes(&request_data) {
+            Ok(op) => op,
+            Err(e) => {
+                log::error!("TCP transport: failed to deserialize client operation: {}", e);
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid operation"));
+            }
+        };
+        
+        log::debug!("TCP transport: processing client operation: {:?}", operation);
+        
+        // Process the operation (simplified - in a full implementation this would go through Raft)
+        let response = match operation {
+            KVOperation::Get { key } => {
+                // For now, return empty response (key not found)
+                KVResponse::Get { key, value: None }
+            }
+            KVOperation::Put { key, value: _ } => {
+                // For now, return success
+                KVResponse::Put { key }
+            }
+            KVOperation::Delete { key } => {
+                // For now, return success
+                KVResponse::Delete { key }
+            }
+            KVOperation::List => {
+                // For now, return empty list
+                KVResponse::List { keys: vec![] }
+            }
+        };
+        
+        // Serialize the response
+        let response_bytes = match Self::serialize_kv_response(&response) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                log::error!("TCP transport: failed to serialize response: {}", e);
+                return Err(std::io::Error::new(std::io::ErrorKind::Other, "Serialization failed"));
+            }
+        };
+        
+        // Send response header (4 bytes for length)
+        let response_len = response_bytes.len() as u32;
+        writer.write_all(&response_len.to_be_bytes())?;
+        
+        // Send response data
+        writer.write_all(&response_bytes)?;
+        writer.flush()?;
+        
+        log::debug!("TCP transport: sent {} byte response to client", response_bytes.len());
+        
+        Ok(())
+    }
+    
+    /// Serialize a KV response to bytes (copied from main.rs)
+    fn serialize_kv_response(response: &crate::kv::KVResponse) -> Result<Vec<u8>> {
+        use crate::kv::KVResponse;
+        
+        match response {
+            KVResponse::Get { key, value } => {
+                let mut bytes = vec![0u8]; // Response type: Get
+                let key_len = key.len() as u32;
+                bytes.extend_from_slice(&key_len.to_be_bytes());
+                bytes.extend_from_slice(key.as_bytes());
+                
+                match value {
+                    Some(val) => {
+                        bytes.push(1u8); // Has value
+                        bytes.extend_from_slice(val);
+                    }
+                    None => {
+                        bytes.push(0u8); // No value
+                    }
+                }
+                Ok(bytes)
+            }
+            KVResponse::Put { key } => {
+                let mut bytes = vec![1u8]; // Response type: Put
+                let key_len = key.len() as u32;
+                bytes.extend_from_slice(&key_len.to_be_bytes());
+                bytes.extend_from_slice(key.as_bytes());
+                Ok(bytes)
+            }
+            KVResponse::Delete { key } => {
+                let mut bytes = vec![2u8]; // Response type: Delete
+                let key_len = key.len() as u32;
+                bytes.extend_from_slice(&key_len.to_be_bytes());
+                bytes.extend_from_slice(key.as_bytes());
+                Ok(bytes)
+            }
+            KVResponse::List { keys } => {
+                let mut bytes = vec![4u8]; // Response type: List
+                let key_count = keys.len() as u32;
+                bytes.extend_from_slice(&key_count.to_be_bytes());
+                
+                for key in keys {
+                    let key_len = key.len() as u32;
+                    bytes.extend_from_slice(&key_len.to_be_bytes());
+                    bytes.extend_from_slice(key.as_bytes());
+                }
+                Ok(bytes)
+            }
+            KVResponse::Error { message } => {
+                let mut bytes = vec![3u8]; // Response type: Error
+                bytes.extend_from_slice(message.as_bytes());
+                Ok(bytes)
+            }
+        }
     }
 }
 
@@ -195,11 +528,12 @@ impl NetworkTransport for TcpTransport {
             let mut writer = BufWriter::new(stream);
             
             // Prepare framed message: 4 bytes length + 8 bytes sender node_id + message data
-            let message_len = message.len() as u32;
+            // The length includes both the node_id and the message data
+            let total_payload_len = (8 + message.len()) as u32;
             let mut framed_message = Vec::with_capacity(4 + 8 + message.len());
             
-            // Add message length (4 bytes)
-            framed_message.extend_from_slice(&message_len.to_be_bytes());
+            // Add total payload length (4 bytes) - includes node_id + message data
+            framed_message.extend_from_slice(&total_payload_len.to_be_bytes());
             
             // Add sender node_id (8 bytes)
             framed_message.extend_from_slice(&self.node_id.to_be_bytes());
@@ -244,6 +578,10 @@ impl NetworkTransport for TcpTransport {
     fn connected_nodes(&self) -> Vec<NodeId> {
         let connections = self.connections.lock().unwrap();
         connections.keys().cloned().collect()
+    }
+    
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 
@@ -344,6 +682,10 @@ impl NetworkTransport for MockTransport {
     
     fn connected_nodes(&self) -> Vec<NodeId> {
         self.connected_nodes.lock().unwrap().clone()
+    }
+    
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 

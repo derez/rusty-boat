@@ -512,58 +512,30 @@ fn process_client_requests(
     raft_node: &mut raft::RaftNode,
     kv_store: &mut kv::InMemoryKVStore,
 ) -> Result<()> {
-    use std::net::{TcpListener, TcpStream};
-    use std::io::{Read, Write, BufReader, BufWriter};
-    use std::sync::{Arc, Mutex};
-    use std::thread;
-    use std::time::Duration;
+    // Get the transport and check for client requests
+    let transport = raft_node.get_transport();
     
-    // For now, this is a simplified implementation that processes one request at a time
-    // In a full implementation, this would use a proper client listener thread
-    
-    if !raft_node.is_leader() {
-        // Only leaders process client requests
-        return Ok(());
-    }
-    
-    // Try to accept a client connection on client port (non-blocking)
-    static CLIENT_LISTENER: std::sync::OnceLock<std::sync::Mutex<Option<(TcpListener, String)>>> = std::sync::OnceLock::new();
-    
-    let listener_mutex = CLIENT_LISTENER.get_or_init(|| {
-        // Use port 9080 for client connections (server port + 1000)
-        let client_address = "127.0.0.1:9080";
-        match TcpListener::bind(client_address) {
-            Ok(listener) => {
-                listener.set_nonblocking(true).unwrap_or_else(|e| {
-                    log::error!("Failed to set client listener non-blocking: {}", e);
-                });
-                log::info!("Client listener started on {}", client_address);
-                std::sync::Mutex::new(Some((listener, client_address.to_string())))
-            }
-            Err(e) => {
-                log::error!("Failed to bind client listener on {}: {}", client_address, e);
-                std::sync::Mutex::new(None)
-            }
+    // Try to downcast to TcpTransport to access client request methods
+    if let Some(tcp_transport) = transport.as_any().downcast_ref::<network::TcpTransport>() {
+        // Get any pending client requests
+        let client_requests = tcp_transport.get_client_requests();
+        
+        if !client_requests.is_empty() {
+            log::debug!("Processing {} client requests", client_requests.len());
         }
-    });
-    
-    if let Ok(listener_guard) = listener_mutex.try_lock() {
-        if let Some((ref listener, ref _address)) = *listener_guard {
-            match listener.accept() {
-                Ok((mut stream, addr)) => {
-                    log::info!("Accepted client connection from {}", addr);
-                    
-                    // Handle the client request
-                    if let Err(e) = handle_client_connection(&mut stream, raft_node, kv_store) {
-                        log::error!("Error handling client connection: {}", e);
-                    }
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    // No pending connections, this is normal
-                }
-                Err(e) => {
-                    log::error!("Error accepting client connection: {}", e);
-                }
+        
+        // Process each client request
+        for (mut stream, request_data) in client_requests {
+            log::debug!("Processing client request ({} bytes)", request_data.len());
+            
+            // Use the proper KV store integration method
+            if let Err(e) = network::TcpTransport::process_client_request_with_store(
+                &request_data, 
+                &mut stream, 
+                kv_store, 
+                raft_node.node_id()
+            ) {
+                log::error!("Error processing client request: {}", e);
             }
         }
     }
