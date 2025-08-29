@@ -7,11 +7,17 @@ pub mod node;
 pub mod state;
 pub mod log;
 pub mod messages;
+pub mod client_tracker;
+pub mod client_response_tests;
 
 pub use node::{RaftNode, MockRaftNode};
 pub use state::RaftState;
 pub use log::RaftLog;
-pub use messages::{RaftMessage, AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse};
+pub use messages::{
+    RaftMessage, AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
+    ClientRequest, ClientResponse, LeaderRedirect,
+};
+pub use client_tracker::{ClientRequestTracker, PendingRequest, RequestId};
 
 use crate::{NodeId, timing::TimingConfig};
 

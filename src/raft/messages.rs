@@ -17,6 +17,12 @@ pub enum RaftMessage {
     AppendEntries(AppendEntriesRequest),
     /// Response to append entries
     AppendEntriesResponse(AppendEntriesResponse),
+    /// Client request message
+    ClientRequest(ClientRequest),
+    /// Client response message
+    ClientResponse(ClientResponse),
+    /// Leader redirection message
+    LeaderRedirect(LeaderRedirect),
 }
 
 /// Request vote message for leader election
@@ -139,6 +145,103 @@ impl AppendEntriesResponse {
     }
 }
 
+/// Client request message for key-value operations
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClientRequest {
+    /// Unique request ID for tracking
+    pub request_id: String,
+    /// Client operation data (serialized KV operation)
+    pub operation: Vec<u8>,
+    /// Client ID for response routing
+    pub client_id: NodeId,
+}
+
+impl ClientRequest {
+    /// Create a new client request
+    pub fn new(request_id: String, operation: Vec<u8>, client_id: NodeId) -> Self {
+        Self {
+            request_id,
+            operation,
+            client_id,
+        }
+    }
+}
+
+/// Client response message for operation results
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClientResponse {
+    /// Request ID this response corresponds to
+    pub request_id: String,
+    /// Success status of the operation
+    pub success: bool,
+    /// Response data (serialized result)
+    pub data: Vec<u8>,
+    /// Error message if operation failed
+    pub error: Option<String>,
+}
+
+impl ClientResponse {
+    /// Create a successful client response
+    pub fn success(request_id: String, data: Vec<u8>) -> Self {
+        Self {
+            request_id,
+            success: true,
+            data,
+            error: None,
+        }
+    }
+    
+    /// Create a failed client response
+    pub fn error(request_id: String, error: String) -> Self {
+        Self {
+            request_id,
+            success: false,
+            data: Vec::new(),
+            error: Some(error),
+        }
+    }
+}
+
+/// Leader redirection message for non-leader nodes
+#[derive(Debug, Clone, PartialEq)]
+pub struct LeaderRedirect {
+    /// Current leader ID (if known)
+    pub leader_id: Option<NodeId>,
+    /// Current term
+    pub term: Term,
+    /// Message for client
+    pub message: String,
+}
+
+impl LeaderRedirect {
+    /// Create a new leader redirect message
+    pub fn new(leader_id: Option<NodeId>, term: Term, message: String) -> Self {
+        Self {
+            leader_id,
+            term,
+            message,
+        }
+    }
+    
+    /// Create a redirect to known leader
+    pub fn to_leader(leader_id: NodeId, term: Term) -> Self {
+        Self::new(
+            Some(leader_id),
+            term,
+            format!("Request must be sent to leader (Node {})", leader_id),
+        )
+    }
+    
+    /// Create a redirect when leader is unknown
+    pub fn no_leader(term: Term) -> Self {
+        Self::new(
+            None,
+            term,
+            "No leader currently available, please retry".to_string(),
+        )
+    }
+}
+
 impl RaftMessage {
     /// Get the term from any Raft message
     pub fn term(&self) -> Term {
@@ -147,6 +250,9 @@ impl RaftMessage {
             RaftMessage::RequestVoteResponse(resp) => resp.term,
             RaftMessage::AppendEntries(req) => req.term,
             RaftMessage::AppendEntriesResponse(resp) => resp.term,
+            RaftMessage::ClientRequest(_) => 0, // Client requests don't have terms
+            RaftMessage::ClientResponse(_) => 0, // Client responses don't have terms
+            RaftMessage::LeaderRedirect(redirect) => redirect.term,
         }
     }
     
@@ -157,6 +263,9 @@ impl RaftMessage {
             RaftMessage::RequestVoteResponse(resp) => Some(resp.voter_id),
             RaftMessage::AppendEntries(req) => Some(req.leader_id),
             RaftMessage::AppendEntriesResponse(resp) => Some(resp.follower_id),
+            RaftMessage::ClientRequest(req) => Some(req.client_id),
+            RaftMessage::ClientResponse(_) => None, // Client responses don't have a sender ID
+            RaftMessage::LeaderRedirect(redirect) => redirect.leader_id,
         }
     }
     
@@ -202,6 +311,44 @@ impl RaftMessage {
                 bytes.push(if resp.success { 1 } else { 0 });
                 bytes.extend_from_slice(&resp.follower_id.to_be_bytes());
                 bytes.extend_from_slice(&resp.last_log_index.to_be_bytes());
+                bytes
+            }
+            RaftMessage::ClientRequest(req) => {
+                let mut bytes = vec![4u8]; // Message type
+                bytes.extend_from_slice(&(req.request_id.len() as u32).to_be_bytes());
+                bytes.extend_from_slice(req.request_id.as_bytes());
+                bytes.extend_from_slice(&(req.operation.len() as u32).to_be_bytes());
+                bytes.extend_from_slice(&req.operation);
+                bytes.extend_from_slice(&req.client_id.to_be_bytes());
+                bytes
+            }
+            RaftMessage::ClientResponse(resp) => {
+                let mut bytes = vec![5u8]; // Message type
+                bytes.extend_from_slice(&(resp.request_id.len() as u32).to_be_bytes());
+                bytes.extend_from_slice(resp.request_id.as_bytes());
+                bytes.push(if resp.success { 1 } else { 0 });
+                bytes.extend_from_slice(&(resp.data.len() as u32).to_be_bytes());
+                bytes.extend_from_slice(&resp.data);
+                if let Some(ref error) = resp.error {
+                    bytes.push(1); // Has error
+                    bytes.extend_from_slice(&(error.len() as u32).to_be_bytes());
+                    bytes.extend_from_slice(error.as_bytes());
+                } else {
+                    bytes.push(0); // No error
+                }
+                bytes
+            }
+            RaftMessage::LeaderRedirect(redirect) => {
+                let mut bytes = vec![6u8]; // Message type
+                if let Some(leader_id) = redirect.leader_id {
+                    bytes.push(1); // Has leader ID
+                    bytes.extend_from_slice(&leader_id.to_be_bytes());
+                } else {
+                    bytes.push(0); // No leader ID
+                }
+                bytes.extend_from_slice(&redirect.term.to_be_bytes());
+                bytes.extend_from_slice(&(redirect.message.len() as u32).to_be_bytes());
+                bytes.extend_from_slice(redirect.message.as_bytes());
                 bytes
             }
         }
@@ -380,6 +527,185 @@ impl RaftMessage {
                 
                 Ok(RaftMessage::AppendEntriesResponse(AppendEntriesResponse::new(
                     term, success, follower_id, last_log_index
+                )))
+            }
+            4 => {
+                // ClientRequest
+                if bytes.len() < 17 { // 1 + 4 + 4 + 8 minimum
+                    return Err(crate::Error::Network("ClientRequest message too short".to_string()));
+                }
+                
+                let request_id_len = u32::from_be_bytes([
+                    bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                ]) as usize;
+                offset += 4;
+                
+                if offset + request_id_len > bytes.len() {
+                    return Err(crate::Error::Network("ClientRequest request_id too short".to_string()));
+                }
+                
+                let request_id = String::from_utf8(bytes[offset..offset + request_id_len].to_vec())
+                    .map_err(|_| crate::Error::Network("Invalid UTF-8 in request_id".to_string()))?;
+                offset += request_id_len;
+                
+                if offset + 4 > bytes.len() {
+                    return Err(crate::Error::Network("ClientRequest operation length missing".to_string()));
+                }
+                
+                let operation_len = u32::from_be_bytes([
+                    bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                ]) as usize;
+                offset += 4;
+                
+                if offset + operation_len > bytes.len() {
+                    return Err(crate::Error::Network("ClientRequest operation too short".to_string()));
+                }
+                
+                let operation = bytes[offset..offset + operation_len].to_vec();
+                offset += operation_len;
+                
+                if offset + 8 > bytes.len() {
+                    return Err(crate::Error::Network("ClientRequest client_id missing".to_string()));
+                }
+                
+                let client_id = u64::from_be_bytes([
+                    bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                    bytes[offset+4], bytes[offset+5], bytes[offset+6], bytes[offset+7],
+                ]);
+                
+                Ok(RaftMessage::ClientRequest(ClientRequest::new(
+                    request_id, operation, client_id
+                )))
+            }
+            5 => {
+                // ClientResponse
+                if bytes.len() < 10 { // 1 + 4 + 1 + 4 + 1 minimum
+                    return Err(crate::Error::Network("ClientResponse message too short".to_string()));
+                }
+                
+                let request_id_len = u32::from_be_bytes([
+                    bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                ]) as usize;
+                offset += 4;
+                
+                if offset + request_id_len > bytes.len() {
+                    return Err(crate::Error::Network("ClientResponse request_id too short".to_string()));
+                }
+                
+                let request_id = String::from_utf8(bytes[offset..offset + request_id_len].to_vec())
+                    .map_err(|_| crate::Error::Network("Invalid UTF-8 in request_id".to_string()))?;
+                offset += request_id_len;
+                
+                if offset + 1 > bytes.len() {
+                    return Err(crate::Error::Network("ClientResponse success flag missing".to_string()));
+                }
+                
+                let success = bytes[offset] != 0;
+                offset += 1;
+                
+                if offset + 4 > bytes.len() {
+                    return Err(crate::Error::Network("ClientResponse data length missing".to_string()));
+                }
+                
+                let data_len = u32::from_be_bytes([
+                    bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                ]) as usize;
+                offset += 4;
+                
+                if offset + data_len > bytes.len() {
+                    return Err(crate::Error::Network("ClientResponse data too short".to_string()));
+                }
+                
+                let data = bytes[offset..offset + data_len].to_vec();
+                offset += data_len;
+                
+                if offset + 1 > bytes.len() {
+                    return Err(crate::Error::Network("ClientResponse error flag missing".to_string()));
+                }
+                
+                let has_error = bytes[offset] != 0;
+                offset += 1;
+                
+                let error = if has_error {
+                    if offset + 4 > bytes.len() {
+                        return Err(crate::Error::Network("ClientResponse error length missing".to_string()));
+                    }
+                    
+                    let error_len = u32::from_be_bytes([
+                        bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                    ]) as usize;
+                    offset += 4;
+                    
+                    if offset + error_len > bytes.len() {
+                        return Err(crate::Error::Network("ClientResponse error too short".to_string()));
+                    }
+                    
+                    let error_str = String::from_utf8(bytes[offset..offset + error_len].to_vec())
+                        .map_err(|_| crate::Error::Network("Invalid UTF-8 in error".to_string()))?;
+                    Some(error_str)
+                } else {
+                    None
+                };
+                
+                Ok(RaftMessage::ClientResponse(ClientResponse {
+                    request_id,
+                    success,
+                    data,
+                    error,
+                }))
+            }
+            6 => {
+                // LeaderRedirect
+                if bytes.len() < 14 { // 1 + 1 + 8 + 4 minimum
+                    return Err(crate::Error::Network("LeaderRedirect message too short".to_string()));
+                }
+                
+                let has_leader = bytes[offset] != 0;
+                offset += 1;
+                
+                let leader_id = if has_leader {
+                    if offset + 8 > bytes.len() {
+                        return Err(crate::Error::Network("LeaderRedirect leader_id missing".to_string()));
+                    }
+                    
+                    let id = u64::from_be_bytes([
+                        bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                        bytes[offset+4], bytes[offset+5], bytes[offset+6], bytes[offset+7],
+                    ]);
+                    offset += 8;
+                    Some(id)
+                } else {
+                    None
+                };
+                
+                if offset + 8 > bytes.len() {
+                    return Err(crate::Error::Network("LeaderRedirect term missing".to_string()));
+                }
+                
+                let term = u64::from_be_bytes([
+                    bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                    bytes[offset+4], bytes[offset+5], bytes[offset+6], bytes[offset+7],
+                ]);
+                offset += 8;
+                
+                if offset + 4 > bytes.len() {
+                    return Err(crate::Error::Network("LeaderRedirect message length missing".to_string()));
+                }
+                
+                let message_len = u32::from_be_bytes([
+                    bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                ]) as usize;
+                offset += 4;
+                
+                if offset + message_len > bytes.len() {
+                    return Err(crate::Error::Network("LeaderRedirect message too short".to_string()));
+                }
+                
+                let message = String::from_utf8(bytes[offset..offset + message_len].to_vec())
+                    .map_err(|_| crate::Error::Network("Invalid UTF-8 in message".to_string()))?;
+                
+                Ok(RaftMessage::LeaderRedirect(LeaderRedirect::new(
+                    leader_id, term, message
                 )))
             }
             _ => Err(crate::Error::Network(format!("Unknown message type: {}", msg_type))),

@@ -468,6 +468,15 @@ fn process_network_messages(
                             log::error!("Error handling AppendEntriesResponse from node {}: {}", from_node_id, e);
                         }
                     }
+                    raft::RaftMessage::ClientRequest(_) => {
+                        log::warn!("Received ClientRequest on Raft port from node {} - should be sent to client port", from_node_id);
+                    }
+                    raft::RaftMessage::ClientResponse(_) => {
+                        log::warn!("Received ClientResponse on Raft port from node {} - unexpected", from_node_id);
+                    }
+                    raft::RaftMessage::LeaderRedirect(_) => {
+                        log::warn!("Received LeaderRedirect on Raft port from node {} - should be sent to client port", from_node_id);
+                    }
                 }
             }
             Err(e) => {
@@ -498,44 +507,90 @@ fn process_client_requests(
         }
         
         // Process each client request
-        for (mut stream, request_data) in client_requests {
+        for (stream, request_data) in client_requests {
             log::debug!("Processing client request ({} bytes)", request_data.len());
             
-            if let Err(e) = process_single_client_request(raft_node, &request_data, &mut stream) {
+            if let Err(e) = process_single_client_request_async(raft_node, kv_store, &request_data, stream) {
                 log::error!("Error processing client request: {}", e);
             }
         }
     }
     
+    // Process committed client requests and send responses
+    if let Err(e) = process_committed_client_responses(raft_node) {
+        log::error!("Error processing committed client responses: {}", e);
+    }
+    
+    // Handle timed out client requests
+    if let Err(e) = handle_timed_out_client_requests(raft_node) {
+        log::error!("Error handling timed out client requests: {}", e);
+    }
+    
+    // Handle requests that need retry due to leadership changes
+    if let Err(e) = handle_client_request_retries(raft_node) {
+        log::error!("Error handling client request retries: {}", e);
+    }
+    
     Ok(())
 }
 
-/// Process a single client request through Raft consensus
-fn process_single_client_request(
+/// Process a single client request asynchronously through Raft consensus
+fn process_single_client_request_async(
     raft_node: &mut raft::RaftNode,
+    kv_store: &kv::InMemoryKVStore,
     request_data: &[u8],
-    stream: &mut std::net::TcpStream,
+    stream: std::net::TcpStream,
 ) -> Result<()> {
-    use std::io::Write;
-    use kvapp_c::kv::{KVOperation, KVResponse};
+    use kvapp_c::kv::KVOperation;
     
     // Deserialize the client request
     let operation = match KVOperation::from_bytes(request_data) {
         Ok(op) => op,
         Err(e) => {
             log::warn!("Failed to deserialize client request: {}", e);
-            send_error_response(stream, "Invalid request format")?;
+            send_error_response_to_stream(&stream, "Invalid request format")?;
             return Ok(());
         }
     };
     
     log::debug!("Client request: {:?}", operation);
     
-    // Handle read operations directly (no need for Raft consensus)
+    // Handle read operations directly from committed state (no need for Raft consensus)
     if matches!(operation, KVOperation::Get { .. } | KVOperation::List) {
-        // For now, return an error since we need to integrate with the KV store
-        // TODO: Implement direct read operations from committed state
-        send_error_response(stream, "Read operations not yet implemented with Raft integration")?;
+        match operation {
+            KVOperation::Get { key } => {
+                log::info!("Processing GET request for key: {}", key);
+                match kv_store.get(&key) {
+                    Some(value) => {
+                        // Create a successful GET response
+                        let response = kvapp_c::kv::KVResponse::Get { 
+                            key: key.clone(), 
+                            value: Some(value.clone()) 
+                        };
+                        send_success_response_to_stream(&stream, &response)?;
+                        log::debug!("GET request successful for key: {}", key);
+                    }
+                    None => {
+                        // Key not found
+                        let response = kvapp_c::kv::KVResponse::Get { 
+                            key: key.clone(), 
+                            value: None 
+                        };
+                        send_success_response_to_stream(&stream, &response)?;
+                        log::debug!("GET request: key not found: {}", key);
+                    }
+                }
+            }
+            KVOperation::List => {
+                log::info!("Processing LIST request");
+                let keys = kv_store.list_keys();
+                let keys_count = keys.len();
+                let response = kvapp_c::kv::KVResponse::List { keys };
+                send_success_response_to_stream(&stream, &response)?;
+                log::debug!("LIST request successful, returned {} keys", keys_count);
+            }
+            _ => unreachable!(),
+        }
         return Ok(());
     }
     
@@ -544,13 +599,13 @@ fn process_single_client_request(
         KVOperation::Put { .. } | KVOperation::Delete { .. } => {
             // Check if this node is the leader
             if !raft_node.is_leader() {
-                // Redirect to leader if known
+                // Send leader redirect response
                 if let Some(leader_id) = raft_node.get_current_leader() {
                     log::info!("Redirecting client request to leader {}", leader_id);
-                    send_error_response(stream, &format!("Not leader. Current leader: {}", leader_id))?;
+                    send_leader_redirect_response(&stream, leader_id, raft_node.get_current_term())?;
                 } else {
                     log::info!("No leader known, rejecting client request");
-                    send_error_response(stream, "No leader available. Try again later.")?;
+                    send_error_response_to_stream(&stream, "No leader available. Try again later.")?;
                 }
                 return Ok(());
             }
@@ -559,23 +614,17 @@ fn process_single_client_request(
             let command_data = operation.to_bytes();
             
             // Append the command to the Raft log
-            match raft_node.append_client_command(command_data) {
+            match raft_node.append_client_command(command_data.clone()) {
                 Ok(log_index) => {
                     log::info!("Client command appended to Raft log at index {}", log_index);
                     
-                    // For now, send a simple success response
-                    // TODO: Implement proper async response after log commitment
-                    let response = match operation {
-                        KVOperation::Put { key, .. } => KVResponse::Put { key },
-                        KVOperation::Delete { key } => KVResponse::Delete { key },
-                        _ => unreachable!(),
-                    };
-                    
-                    send_success_response(stream, &response)?;
+                    // Track this request for async response after log commitment
+                    let request_id = raft_node.track_client_request(stream, log_index, command_data)?;
+                    log::debug!("Tracking client request {} for async response", request_id);
                 }
                 Err(e) => {
                     log::error!("Failed to append client command to Raft log: {}", e);
-                    send_error_response(stream, "Failed to process command")?;
+                    send_error_response_to_stream(&stream, "Failed to process command")?;
                 }
             }
         }
@@ -588,7 +637,156 @@ fn process_single_client_request(
     Ok(())
 }
 
-/// Send a success response to the client
+/// Process committed client requests and send responses
+fn process_committed_client_responses(raft_node: &mut raft::RaftNode) -> Result<()> {
+    // Only leaders track client requests
+    if !raft_node.is_leader() {
+        return Ok(());
+    }
+    
+    let commit_index = raft_node.get_commit_index();
+    
+    // Get requests that can be completed due to log commitment
+    let completable_requests = raft_node.get_completable_client_requests(commit_index);
+    
+    if !completable_requests.is_empty() {
+        log::info!("Processing {} committed client requests", completable_requests.len());
+    }
+    
+    // Send responses for completed requests
+    for pending_request in completable_requests {
+        log::info!("Sending response for committed request {}", pending_request.request_id);
+        
+        // Deserialize the original request to determine response type
+        match kvapp_c::kv::KVOperation::from_bytes(&pending_request.request_data) {
+            Ok(operation) => {
+                let response = match operation {
+                    kvapp_c::kv::KVOperation::Put { key, .. } => {
+                        kvapp_c::kv::KVResponse::Put { key }
+                    }
+                    kvapp_c::kv::KVOperation::Delete { key } => {
+                        kvapp_c::kv::KVResponse::Delete { key }
+                    }
+                    _ => {
+                        log::warn!("Unexpected operation type in committed request");
+                        continue;
+                    }
+                };
+                
+                if let Err(e) = send_success_response_to_stream(&pending_request.stream, &response) {
+                    log::error!("Failed to send response for request {}: {}", pending_request.request_id, e);
+                }
+            }
+            Err(e) => {
+                log::error!("Failed to deserialize committed request data: {}", e);
+                if let Err(e) = send_error_response_to_stream(&pending_request.stream, "Internal error processing request") {
+                    log::error!("Failed to send error response: {}", e);
+                }
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+/// Handle timed out client requests
+fn handle_timed_out_client_requests(raft_node: &mut raft::RaftNode) -> Result<()> {
+    // Only leaders track client requests
+    if !raft_node.is_leader() {
+        return Ok(());
+    }
+    
+    // Get requests that have timed out
+    let timed_out_requests = raft_node.get_timed_out_client_requests();
+    
+    if !timed_out_requests.is_empty() {
+        log::warn!("Handling {} timed out client requests", timed_out_requests.len());
+    }
+    
+    // Send timeout responses
+    for pending_request in timed_out_requests {
+        log::warn!("Sending timeout response for request {}", pending_request.request_id);
+        
+        if let Err(e) = send_error_response_to_stream(&pending_request.stream, "Request timed out") {
+            log::error!("Failed to send timeout response for request {}: {}", pending_request.request_id, e);
+        }
+    }
+    
+    Ok(())
+}
+
+/// Handle client requests that need retry due to leadership changes
+fn handle_client_request_retries(raft_node: &mut raft::RaftNode) -> Result<()> {
+    // Only process retries when we're not the leader (leadership changed)
+    if raft_node.is_leader() {
+        return Ok(());
+    }
+    
+    // Check if we have a client tracker (we were previously a leader)
+    if raft_node.pending_client_requests_count() > 0 {
+        log::info!("Node {} is no longer leader, handling {} pending client requests for retry", 
+                   raft_node.node_id(), raft_node.pending_client_requests_count());
+        
+        // Get all requests that need retry due to leadership change
+        let retry_requests = raft_node.get_requests_for_retry();
+        
+        if !retry_requests.is_empty() {
+            log::info!("Handling {} client requests for retry due to leadership change", retry_requests.len());
+        }
+        
+        // Send leader redirect responses for retry requests
+        for pending_request in retry_requests {
+            log::info!("Redirecting client request {} due to leadership change", pending_request.request_id);
+            
+            if let Some(leader_id) = raft_node.get_current_leader() {
+                if let Err(e) = send_leader_redirect_response(&pending_request.stream, leader_id, raft_node.get_current_term()) {
+                    log::error!("Failed to send leader redirect for request {}: {}", pending_request.request_id, e);
+                }
+            } else {
+                // No known leader, send error response
+                if let Err(e) = send_error_response_to_stream(&pending_request.stream, "Leadership change occurred. No leader available. Please retry.") {
+                    log::error!("Failed to send leadership change error for request {}: {}", pending_request.request_id, e);
+                }
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+/// Send a leader redirect response to the client
+fn send_leader_redirect_response(
+    stream: &std::net::TcpStream,
+    leader_id: kvapp_c::NodeId,
+    term: kvapp_c::Term,
+) -> Result<()> {
+    use std::io::Write;
+    use kvapp_c::raft::{RaftMessage, LeaderRedirect};
+    
+    let redirect = LeaderRedirect {
+        leader_id: Some(leader_id),
+        term,
+        message: format!("Not leader. Current leader is node {}", leader_id),
+    };
+    
+    let message = RaftMessage::LeaderRedirect(redirect);
+    let message_bytes = message.to_bytes();
+    
+    // Send framed response
+    let response_len = message_bytes.len() as u32;
+    let mut framed_response = Vec::with_capacity(4 + message_bytes.len());
+    framed_response.extend_from_slice(&response_len.to_be_bytes());
+    framed_response.extend_from_slice(&message_bytes);
+    
+    let mut stream_mut = stream;
+    stream_mut.write_all(&framed_response)?;
+    stream_mut.flush()?;
+    
+    log::debug!("Sent leader redirect response to node {} ({} bytes)", leader_id, framed_response.len());
+    Ok(())
+}
+
+/// Send a success response to the client (mutable stream)
 fn send_success_response(stream: &mut std::net::TcpStream, response: &kvapp_c::kv::KVResponse) -> Result<()> {
     use std::io::Write;
     
@@ -626,7 +824,76 @@ fn send_success_response(stream: &mut std::net::TcpStream, response: &kvapp_c::k
     Ok(())
 }
 
-/// Send an error response to the client
+/// Send a success response to the client (immutable stream)
+fn send_success_response_to_stream(stream: &std::net::TcpStream, response: &kvapp_c::kv::KVResponse) -> Result<()> {
+    use std::io::Write;
+    
+    // Serialize the response (simplified for now)
+    let response_data = match response {
+        kvapp_c::kv::KVResponse::Put { key } => {
+            let mut data = vec![1u8]; // Put response type
+            let key_len = key.len() as u32;
+            data.extend_from_slice(&key_len.to_be_bytes());
+            data.extend_from_slice(key.as_bytes());
+            data
+        }
+        kvapp_c::kv::KVResponse::Delete { key } => {
+            let mut data = vec![2u8]; // Delete response type
+            let key_len = key.len() as u32;
+            data.extend_from_slice(&key_len.to_be_bytes());
+            data.extend_from_slice(key.as_bytes());
+            data
+        }
+        kvapp_c::kv::KVResponse::Get { key, value } => {
+            let mut data = vec![0u8]; // Get response type (client expects 0)
+            let key_len = key.len() as u32;
+            data.extend_from_slice(&key_len.to_be_bytes());
+            data.extend_from_slice(key.as_bytes());
+            
+            match value {
+                Some(val) => {
+                    data.push(1u8); // Value present
+                    data.extend_from_slice(val);
+                }
+                None => {
+                    data.push(0u8); // Value not present (key not found)
+                }
+            }
+            data
+        }
+        kvapp_c::kv::KVResponse::List { keys } => {
+            let mut data = vec![4u8]; // List response type (client expects 4)
+            let keys_count = keys.len() as u32;
+            data.extend_from_slice(&keys_count.to_be_bytes());
+            
+            for key in keys {
+                let key_len = key.len() as u32;
+                data.extend_from_slice(&key_len.to_be_bytes());
+                data.extend_from_slice(key.as_bytes());
+            }
+            data
+        }
+        _ => {
+            return Err(Error::Serialization("Unsupported response type".to_string()));
+        }
+    };
+    
+    // Send framed response
+    let response_len = response_data.len() as u32;
+    let mut framed_response = Vec::with_capacity(4 + response_data.len());
+    framed_response.extend_from_slice(&response_len.to_be_bytes());
+    framed_response.extend_from_slice(&response_data);
+    
+    // Clone the stream to get a mutable reference
+    let mut stream_clone = stream.try_clone()?;
+    stream_clone.write_all(&framed_response)?;
+    stream_clone.flush()?;
+    
+    log::debug!("Sent success response ({} bytes)", framed_response.len());
+    Ok(())
+}
+
+/// Send an error response to the client (mutable stream)
 fn send_error_response(stream: &mut std::net::TcpStream, message: &str) -> Result<()> {
     use std::io::Write;
     
@@ -642,6 +909,29 @@ fn send_error_response(stream: &mut std::net::TcpStream, message: &str) -> Resul
     
     stream.write_all(&framed_response)?;
     stream.flush()?;
+    
+    log::debug!("Sent error response: {} ({} bytes)", message, framed_response.len());
+    Ok(())
+}
+
+/// Send an error response to the client (immutable stream)
+fn send_error_response_to_stream(stream: &std::net::TcpStream, message: &str) -> Result<()> {
+    use std::io::Write;
+    
+    // Create error response
+    let mut response_data = vec![3u8]; // Error response type
+    response_data.extend_from_slice(message.as_bytes());
+    
+    // Send framed response
+    let response_len = response_data.len() as u32;
+    let mut framed_response = Vec::with_capacity(4 + response_data.len());
+    framed_response.extend_from_slice(&response_len.to_be_bytes());
+    framed_response.extend_from_slice(&response_data);
+    
+    // Clone the stream to get a mutable reference
+    let mut stream_clone = stream.try_clone()?;
+    stream_clone.write_all(&framed_response)?;
+    stream_clone.flush()?;
     
     log::debug!("Sent error response: {} ({} bytes)", message, framed_response.len());
     Ok(())

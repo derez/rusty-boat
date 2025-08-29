@@ -5,6 +5,7 @@
 
 use crate::{Result, Error, NodeId, Term, LogIndex};
 use super::{NodeState, RaftConfig, RaftMessage, RequestVoteRequest, RequestVoteResponse, AppendEntriesRequest, AppendEntriesResponse};
+use super::client_tracker::{ClientRequestTracker, PendingRequest, RequestId};
 use crate::storage::LogEntry;
 use crate::storage::log_storage::LogStorage;
 use crate::storage::state_storage::StateStorage;
@@ -45,6 +46,8 @@ pub struct RaftNode {
     log_storage: Option<Box<dyn LogStorage>>,
     /// Network transport for communication
     transport: Option<Box<dyn NetworkTransport>>,
+    /// Client request tracker for async response handling (leader only)
+    client_tracker: Option<ClientRequestTracker>,
 }
 
 impl RaftNode {
@@ -66,6 +69,7 @@ impl RaftNode {
             state_storage: None,
             log_storage: None,
             transport: None,
+            client_tracker: None,
         }
     }
     
@@ -92,6 +96,7 @@ impl RaftNode {
             state_storage: Some(state_storage),
             log_storage: Some(log_storage),
             transport: Some(transport),
+            client_tracker: None,
         };
         
         // Load persistent state
@@ -159,8 +164,38 @@ impl RaftNode {
                 if matches!(old_state, NodeState::Leader) {
                     log::info!("Node {} stepping down as leader", self.config.node_id);
                     self.current_leader = None;
+                    // Clear client tracker when stepping down as leader
+                    if let Some(ref mut client_tracker) = self.client_tracker {
+                        let cleared_requests = client_tracker.clear_all_requests();
+                        log::info!(
+                            "Node {} cleared {} pending client requests when stepping down as leader",
+                            self.config.node_id, cleared_requests.len()
+                        );
+                    }
+                    self.client_tracker = None;
                 }
                 log::debug!("Node {} now following in term {}", self.config.node_id, self.current_term);
+            }
+            NodeState::Candidate => {
+                // Start election process
+                self.current_term += 1;
+                self.voted_for = Some(self.config.node_id);
+                self.current_leader = None;
+                // Clear client tracker when becoming candidate (no longer leader)
+                if matches!(old_state, NodeState::Leader) {
+                    if let Some(ref mut client_tracker) = self.client_tracker {
+                        let cleared_requests = client_tracker.clear_all_requests();
+                        log::info!(
+                            "Node {} cleared {} pending client requests when becoming candidate",
+                            self.config.node_id, cleared_requests.len()
+                        );
+                    }
+                    self.client_tracker = None;
+                }
+                log::info!(
+                    "Node {} starting election for term {} (voted for self)",
+                    self.config.node_id, self.current_term
+                );
             }
             NodeState::Candidate => {
                 // Start election process
@@ -722,6 +757,11 @@ impl RaftNode {
                         );
                         // Continue applying other entries even if one fails
                     }
+                    
+                    // Handle pending client requests for this committed log entry (leader only)
+                    if matches!(self.state, NodeState::Leader) {
+                        self.handle_committed_client_requests(self.last_applied)?;
+                    }
                 } else {
                     log::warn!(
                         "Node {} tried to apply missing log entry {}",
@@ -894,6 +934,14 @@ impl RaftNode {
             }
         }
         
+        // Initialize client request tracker for async response handling
+        self.client_tracker = Some(ClientRequestTracker::new());
+        
+        log::info!(
+            "Leader {} initialized client request tracker for async response handling",
+            self.config.node_id
+        );
+        
         Ok(())
     }
     
@@ -1034,6 +1082,153 @@ impl RaftNode {
         } else {
             None
         }
+    }
+    
+    /// Get the last log index (total number of log entries)
+    pub fn get_last_log_index(&self) -> LogIndex {
+        if let Some(ref log_storage) = self.log_storage {
+            log_storage.get_last_index()
+        } else {
+            0
+        }
+    }
+    
+    /// Handle committed client requests for async response handling (leader only)
+    fn handle_committed_client_requests(&mut self, committed_log_index: LogIndex) -> Result<()> {
+        if !matches!(self.state, NodeState::Leader) {
+            return Ok(());
+        }
+        
+        if let Some(ref mut client_tracker) = self.client_tracker {
+            // Get all requests that can be completed for this log index
+            let completable_requests = client_tracker.get_completable_requests(committed_log_index);
+            
+            if !completable_requests.is_empty() {
+                log::info!(
+                    "Leader {} handling {} client requests for committed log index {}",
+                    self.config.node_id, completable_requests.len(), committed_log_index
+                );
+                
+                for pending_request in completable_requests {
+                    log::debug!(
+                        "Leader {} completing client request {} for log index {}",
+                        self.config.node_id, pending_request.request_id, pending_request.log_index
+                    );
+                    
+                    // TODO: Send success response to client via TCP stream
+                    // For now, we just log that the request would be completed
+                    // The actual response sending will be implemented when we integrate
+                    // with the server event loop that has access to TCP streams
+                    
+                    log::info!(
+                        "Leader {} would send success response to client for request {} (log index {})",
+                        self.config.node_id, pending_request.request_id, pending_request.log_index
+                    );
+                }
+            }
+            
+            // Handle timed out requests
+            let timed_out_requests = client_tracker.get_timed_out_requests();
+            if !timed_out_requests.is_empty() {
+                log::warn!(
+                    "Leader {} handling {} timed out client requests",
+                    self.config.node_id, timed_out_requests.len()
+                );
+                
+                for pending_request in timed_out_requests {
+                    log::warn!(
+                        "Leader {} timing out client request {} (log index {}, {} retries)",
+                        self.config.node_id, pending_request.request_id, pending_request.log_index, pending_request.retry_count
+                    );
+                    
+                    // TODO: Send timeout/error response to client via TCP stream
+                    log::warn!(
+                        "Leader {} would send timeout response to client for request {}",
+                        self.config.node_id, pending_request.request_id
+                    );
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    
+    /// Get the number of pending client requests (leader only)
+    pub fn pending_client_requests_count(&self) -> usize {
+        if let Some(ref client_tracker) = self.client_tracker {
+            client_tracker.pending_count()
+        } else {
+            0
+        }
+    }
+    
+    /// Track a client request for async response handling (leader only) - full version
+    pub fn track_client_request(&mut self, stream: std::net::TcpStream, log_index: LogIndex, request_data: Vec<u8>) -> Result<RequestId> {
+        if !matches!(self.state, NodeState::Leader) {
+            return Err(Error::Raft(format!(
+                "Node {} is not the leader, cannot track client request",
+                self.config.node_id
+            )));
+        }
+        
+        if let Some(ref mut client_tracker) = self.client_tracker {
+            let request_id = client_tracker.add_request(stream, log_index, request_data);
+            
+            log::debug!(
+                "Leader {} tracking client request {} for log index {}",
+                self.config.node_id, request_id, log_index
+            );
+            
+            Ok(request_id)
+        } else {
+            Err(Error::Raft(format!(
+                "Leader {} client tracker not initialized",
+                self.config.node_id
+            )))
+        }
+    }
+    
+    /// Get requests that can be completed due to log commitment (leader only)
+    pub fn get_completable_client_requests(&mut self, commit_index: LogIndex) -> Vec<PendingRequest> {
+        if !matches!(self.state, NodeState::Leader) {
+            return Vec::new();
+        }
+        
+        if let Some(ref mut client_tracker) = self.client_tracker {
+            client_tracker.get_completable_requests(commit_index)
+        } else {
+            Vec::new()
+        }
+    }
+    
+    /// Get requests that have timed out (leader only)
+    pub fn get_timed_out_client_requests(&mut self) -> Vec<PendingRequest> {
+        if !matches!(self.state, NodeState::Leader) {
+            return Vec::new();
+        }
+        
+        if let Some(ref mut client_tracker) = self.client_tracker {
+            client_tracker.get_timed_out_requests()
+        } else {
+            Vec::new()
+        }
+    }
+    
+    /// Get requests that need retry due to leadership changes
+    pub fn get_requests_for_retry(&mut self) -> Vec<PendingRequest> {
+        // This method should be called when stepping down from leadership
+        // or when leadership changes occur
+        if let Some(ref mut client_tracker) = self.client_tracker {
+            client_tracker.get_requests_for_retry()
+        } else {
+            Vec::new()
+        }
+    }
+    
+    /// Get the current term for external access
+    pub fn get_current_term(&self) -> Term {
+        self.current_term
     }
     
     // ========== SAFETY MECHANISMS ==========
