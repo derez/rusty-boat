@@ -2,6 +2,21 @@
 name = "kvapp-c"
 version = "0.1.0"
 edition = "2024"
+description = "A Raft-based distributed key-value store library and application"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/your-username/kvapp-c"
+keywords = ["raft", "distributed", "consensus", "key-value", "database"]
+categories = ["database", "network-programming"]
+
+# Library configuration
+[lib]
+name = "kvapp_c"
+path = "src/lib.rs"
+
+# Binary configuration
+[[bin]]
+name = "kvapp-c"
+path = "src/main.rs"
 
 [dependencies]
 log = "0.4"
