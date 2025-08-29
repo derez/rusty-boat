@@ -153,10 +153,6 @@ impl KVClient {
     
     /// Send a request to the server and get response
     fn send_request(&self, operation: KVOperation) -> Result<KVResponse> {
-        
-        
-        
-        
         log::debug!("Sending KV request: {:?}", operation);
         
         // Check if we have any cluster addresses
@@ -164,17 +160,37 @@ impl KVClient {
             return Err(Error::Network("No cluster addresses configured".to_string()));
         }
         
-        // Try each server in the cluster until we find one that responds
+        // Try each server in the cluster until we find one that responds successfully
         // In a Raft cluster, only the leader can process client requests
         let mut last_error = None;
+        let mut leader_redirect_info: Option<String> = None;
         
         for (index, server_address) in self.cluster_addresses.iter().enumerate() {
-            log::info!("Client connecting to server at {} (this should be the leader)", server_address);
+            log::info!("Client connecting to server at {}", server_address);
             
             match self.try_server_request(&operation, server_address) {
                 Ok(response) => {
-                    log::info!("Successfully connected to leader at {}", server_address);
-                    return Ok(response);
+                    match &response {
+                        KVResponse::Error { message } if message.contains("Not leader") => {
+                            // This is a LeaderRedirect response converted to an error
+                            log::info!("Server at {} redirected client: {}", server_address, message);
+                            leader_redirect_info = Some(message.clone());
+                            
+                            // Continue trying other servers instead of returning the error immediately
+                            if index < self.cluster_addresses.len() - 1 {
+                                log::debug!("Trying next server in cluster to find leader...");
+                                continue;
+                            } else {
+                                // This was the last server and it's also not the leader
+                                return Err(Error::KeyValue(message.clone()));
+                            }
+                        }
+                        _ => {
+                            // Successful response from leader
+                            log::info!("Successfully processed request with leader at {}", server_address);
+                            return Ok(response);
+                        }
+                    }
                 }
                 Err(e) => {
                     log::warn!("Failed to connect to server at {}: {}", server_address, e);
@@ -190,7 +206,12 @@ impl KVClient {
         }
         
         // If we get here, all servers failed
-        Err(last_error.unwrap_or_else(|| Error::Network("No servers available".to_string())))
+        // Prioritize leader redirect information if we have it
+        if let Some(redirect_msg) = leader_redirect_info {
+            Err(Error::KeyValue(redirect_msg))
+        } else {
+            Err(last_error.unwrap_or_else(|| Error::Network("No servers available".to_string())))
+        }
     }
     
     /// Try to send a request to a specific server
@@ -335,7 +356,85 @@ impl KVClient {
                 
                 Ok(KVResponse::List { keys })
             }
-            _ => Err(Error::Serialization("Unknown response type".to_string())),
+            6 => {
+                // LeaderRedirect response (RaftMessage type 6)
+                log::debug!("Received LeaderRedirect response from server");
+                
+                // Parse the LeaderRedirect message to extract the error message
+                match self.parse_leader_redirect(bytes) {
+                    Ok(message) => {
+                        log::info!("Server redirected client: {}", message);
+                        Ok(KVResponse::Error { message })
+                    }
+                    Err(e) => {
+                        log::error!("Failed to parse LeaderRedirect message: {}", e);
+                        Ok(KVResponse::Error { 
+                            message: "Server is not the leader. Please retry with the current leader.".to_string() 
+                        })
+                    }
+                }
+            }
+            _ => Err(Error::Serialization(format!("Unknown response type: {}", bytes[0]))),
+        }
+    }
+    
+    /// Parse a LeaderRedirect message from bytes
+    fn parse_leader_redirect(&self, bytes: &[u8]) -> Result<String> {
+        if bytes.len() < 14 { // 1 + 1 + 8 + 4 minimum
+            return Err(Error::Serialization("LeaderRedirect message too short".to_string()));
+        }
+        
+        let mut offset = 1; // Skip message type
+        
+        let has_leader = bytes[offset] != 0;
+        offset += 1;
+        
+        let leader_id = if has_leader {
+            if offset + 8 > bytes.len() {
+                return Err(Error::Serialization("LeaderRedirect leader_id missing".to_string()));
+            }
+            
+            let id = u64::from_be_bytes([
+                bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                bytes[offset+4], bytes[offset+5], bytes[offset+6], bytes[offset+7],
+            ]);
+            offset += 8;
+            Some(id)
+        } else {
+            None
+        };
+        
+        if offset + 8 > bytes.len() {
+            return Err(Error::Serialization("LeaderRedirect term missing".to_string()));
+        }
+        
+        let _term = u64::from_be_bytes([
+            bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+            bytes[offset+4], bytes[offset+5], bytes[offset+6], bytes[offset+7],
+        ]);
+        offset += 8;
+        
+        if offset + 4 > bytes.len() {
+            return Err(Error::Serialization("LeaderRedirect message length missing".to_string()));
+        }
+        
+        let message_len = u32::from_be_bytes([
+            bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+        ]) as usize;
+        offset += 4;
+        
+        if offset + message_len > bytes.len() {
+            return Err(Error::Serialization("LeaderRedirect message too short".to_string()));
+        }
+        
+        let message = String::from_utf8(bytes[offset..offset + message_len].to_vec())
+            .map_err(|_| Error::Serialization("Invalid UTF-8 in LeaderRedirect message".to_string()))?;
+        
+        // Create a user-friendly message
+        if let Some(leader_id) = leader_id {
+            Ok(format!("Not leader. Current leader is node {}. Please retry.", leader_id))
+        } else {
+            Ok("No leader currently available. Please retry later.".to_string())
         }
     }
 }
