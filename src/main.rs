@@ -8,6 +8,7 @@ use kvapp_c::{
     storage, network, kv, raft, timing,
     NodeId, Result, Error, TimingConfig, TimingMode,
 };
+use kvapp_c::kv::KVStore;
 
 fn main() {
     // Parse command line arguments first to check for --verbose
@@ -233,6 +234,7 @@ fn run_server_loop(
     
     let mut last_heartbeat = Instant::now();
     let heartbeat_interval = timing_config.heartbeat_interval();
+    let mut last_applied_to_kv = 0u64; // Track what we've applied to KV store
     
     loop {
         // Check for election timeout
@@ -255,6 +257,11 @@ fn run_server_loop(
         // Process any client requests
         if let Err(e) = process_client_requests(raft_node, kv_store, timing_config) {
             log::error!("Error processing client requests: {}", e);
+        }
+        
+        // Apply committed entries to KV store
+        if let Err(e) = apply_committed_entries_to_kv_store(raft_node, kv_store, &mut last_applied_to_kv) {
+            log::error!("Error applying committed entries to KV store: {}", e);
         }
         
         // Apply configurable event loop delay
@@ -472,7 +479,7 @@ fn process_network_messages(
     Ok(())
 }
 
-/// Process client requests and apply them to the Raft log
+/// Process client requests through the Raft log (Raft-compliant)
 fn process_client_requests(
     raft_node: &mut raft::RaftNode,
     kv_store: &mut kv::InMemoryKVStore,
@@ -494,18 +501,149 @@ fn process_client_requests(
         for (mut stream, request_data) in client_requests {
             log::debug!("Processing client request ({} bytes)", request_data.len());
             
-            // Use the proper KV store integration method
-            if let Err(e) = network::TcpTransport::process_client_request_with_store(
-                &request_data, 
-                &mut stream, 
-                kv_store, 
-                raft_node.node_id()
-            ) {
+            if let Err(e) = process_single_client_request(raft_node, &request_data, &mut stream) {
                 log::error!("Error processing client request: {}", e);
             }
         }
     }
     
+    Ok(())
+}
+
+/// Process a single client request through Raft consensus
+fn process_single_client_request(
+    raft_node: &mut raft::RaftNode,
+    request_data: &[u8],
+    stream: &mut std::net::TcpStream,
+) -> Result<()> {
+    use std::io::Write;
+    use kvapp_c::kv::{KVOperation, KVResponse};
+    
+    // Deserialize the client request
+    let operation = match KVOperation::from_bytes(request_data) {
+        Ok(op) => op,
+        Err(e) => {
+            log::warn!("Failed to deserialize client request: {}", e);
+            send_error_response(stream, "Invalid request format")?;
+            return Ok(());
+        }
+    };
+    
+    log::debug!("Client request: {:?}", operation);
+    
+    // Handle read operations directly (no need for Raft consensus)
+    if matches!(operation, KVOperation::Get { .. } | KVOperation::List) {
+        // For now, return an error since we need to integrate with the KV store
+        // TODO: Implement direct read operations from committed state
+        send_error_response(stream, "Read operations not yet implemented with Raft integration")?;
+        return Ok(());
+    }
+    
+    // Handle write operations through Raft consensus
+    match operation {
+        KVOperation::Put { .. } | KVOperation::Delete { .. } => {
+            // Check if this node is the leader
+            if !raft_node.is_leader() {
+                // Redirect to leader if known
+                if let Some(leader_id) = raft_node.get_current_leader() {
+                    log::info!("Redirecting client request to leader {}", leader_id);
+                    send_error_response(stream, &format!("Not leader. Current leader: {}", leader_id))?;
+                } else {
+                    log::info!("No leader known, rejecting client request");
+                    send_error_response(stream, "No leader available. Try again later.")?;
+                }
+                return Ok(());
+            }
+            
+            // Serialize the operation for the Raft log
+            let command_data = operation.to_bytes();
+            
+            // Append the command to the Raft log
+            match raft_node.append_client_command(command_data) {
+                Ok(log_index) => {
+                    log::info!("Client command appended to Raft log at index {}", log_index);
+                    
+                    // For now, send a simple success response
+                    // TODO: Implement proper async response after log commitment
+                    let response = match operation {
+                        KVOperation::Put { key, .. } => KVResponse::Put { key },
+                        KVOperation::Delete { key } => KVResponse::Delete { key },
+                        _ => unreachable!(),
+                    };
+                    
+                    send_success_response(stream, &response)?;
+                }
+                Err(e) => {
+                    log::error!("Failed to append client command to Raft log: {}", e);
+                    send_error_response(stream, "Failed to process command")?;
+                }
+            }
+        }
+        KVOperation::Get { .. } | KVOperation::List => {
+            // Already handled above
+            unreachable!();
+        }
+    }
+    
+    Ok(())
+}
+
+/// Send a success response to the client
+fn send_success_response(stream: &mut std::net::TcpStream, response: &kvapp_c::kv::KVResponse) -> Result<()> {
+    use std::io::Write;
+    
+    // Serialize the response (simplified for now)
+    let response_data = match response {
+        kvapp_c::kv::KVResponse::Put { key } => {
+            let mut data = vec![1u8]; // Put response type
+            let key_len = key.len() as u32;
+            data.extend_from_slice(&key_len.to_be_bytes());
+            data.extend_from_slice(key.as_bytes());
+            data
+        }
+        kvapp_c::kv::KVResponse::Delete { key } => {
+            let mut data = vec![2u8]; // Delete response type
+            let key_len = key.len() as u32;
+            data.extend_from_slice(&key_len.to_be_bytes());
+            data.extend_from_slice(key.as_bytes());
+            data
+        }
+        _ => {
+            return Err(Error::Serialization("Unsupported response type".to_string()));
+        }
+    };
+    
+    // Send framed response
+    let response_len = response_data.len() as u32;
+    let mut framed_response = Vec::with_capacity(4 + response_data.len());
+    framed_response.extend_from_slice(&response_len.to_be_bytes());
+    framed_response.extend_from_slice(&response_data);
+    
+    stream.write_all(&framed_response)?;
+    stream.flush()?;
+    
+    log::debug!("Sent success response ({} bytes)", framed_response.len());
+    Ok(())
+}
+
+/// Send an error response to the client
+fn send_error_response(stream: &mut std::net::TcpStream, message: &str) -> Result<()> {
+    use std::io::Write;
+    
+    // Create error response
+    let mut response_data = vec![3u8]; // Error response type
+    response_data.extend_from_slice(message.as_bytes());
+    
+    // Send framed response
+    let response_len = response_data.len() as u32;
+    let mut framed_response = Vec::with_capacity(4 + response_data.len());
+    framed_response.extend_from_slice(&response_len.to_be_bytes());
+    framed_response.extend_from_slice(&response_data);
+    
+    stream.write_all(&framed_response)?;
+    stream.flush()?;
+    
+    log::debug!("Sent error response: {} ({} bytes)", message, framed_response.len());
     Ok(())
 }
 
@@ -743,6 +881,53 @@ fn parse_client_args(args: &[String]) -> Result<ClientConfig> {
     Ok(ClientConfig {
         cluster_addresses,
     })
+}
+
+/// Apply committed entries from Raft log to KV store
+fn apply_committed_entries_to_kv_store(
+    raft_node: &mut raft::RaftNode,
+    kv_store: &mut kv::InMemoryKVStore,
+    last_applied_to_kv: &mut u64,
+) -> Result<()> {
+    let commit_index = raft_node.get_commit_index();
+    
+    // Apply any newly committed entries to the KV store
+    while *last_applied_to_kv < commit_index {
+        *last_applied_to_kv += 1;
+        
+        // Get the log entry at this index
+        if let Some(log_entry) = raft_node.get_log_entry(*last_applied_to_kv) {
+            log::debug!(
+                "Applying committed log entry {} to KV store (term: {}, {} bytes)",
+                *last_applied_to_kv, log_entry.term, log_entry.data.len()
+            );
+            
+            // Apply the entry to the KV store
+            match kv_store.apply_entry(&log_entry) {
+                Ok(response) => {
+                    log::info!(
+                        "Successfully applied log entry {} to KV store: {:?}",
+                        *last_applied_to_kv, response
+                    );
+                }
+                Err(e) => {
+                    log::error!(
+                        "Failed to apply log entry {} to KV store: {}",
+                        *last_applied_to_kv, e
+                    );
+                    // Continue applying other entries even if one fails
+                }
+            }
+        } else {
+            log::warn!(
+                "Missing log entry {} when trying to apply to KV store",
+                *last_applied_to_kv
+            );
+            break;
+        }
+    }
+    
+    Ok(())
 }
 
 fn parse_cluster_spec(cluster_spec: &str) -> Result<std::collections::HashMap<NodeId, String>> {

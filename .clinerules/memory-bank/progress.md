@@ -752,3 +752,92 @@
 - **Testing**: Property-based testing could enhance coverage
 
 The project has successfully completed Phase 4 (Network Communication) with a fully functional distributed key-value store with real TCP network communication. The implementation includes a complete Raft consensus algorithm, comprehensive CLI interface, file-based persistence, robust testing, and production-ready network communication. The system is now a complete distributed system ready for Phase 5: production features.
+
+### Phase 6: Client Command Raft Log Integration (IN PROGRESS)
+
+**Current Issue**: Client commands are being processed directly without going through the Raft log, violating the Raft specification that requires all client commands to be replicated through consensus.
+
+**Problem Analysis**:
+1. **Direct Processing**: Client requests are currently applied directly to the KV store without Raft consensus
+2. **No Replication**: Changes are not replicated to other nodes in the cluster
+3. **Consistency Violation**: Nodes can have different states, breaking distributed consensus
+4. **Raft Specification Violation**: All client commands must go through the Raft log according to the paper
+
+#### Phase 6 Step 1: Raft Log Integration for Client Commands (PENDING)
+- [ ] **Modify LogEntry Structure**: Add support for KV operations in log entries
+  - Enhance LogEntry to contain serialized KV operations
+  - Update serialization/deserialization for KV operations in log entries
+  - Ensure proper type safety and error handling
+- [ ] **Add RaftNode Client Command Methods**: Implement leader-only client command processing
+  - Add `append_client_command()` method to RaftNode for adding client commands to log
+  - Implement proper leader validation (only leaders can accept client commands)
+  - Add follower redirection mechanism to current leader
+  - Integrate with existing log replication mechanism
+- [ ] **Update Server Event Loop**: Modify client request processing to use Raft log
+  - Change `process_client_requests()` to append commands to Raft log instead of direct application
+  - Add leader-only processing with proper error responses for followers
+  - Implement request tracking for async response handling after log commitment
+- [ ] **State Machine Integration**: Implement proper KV state machine application
+  - Update `apply_committed_entries()` to process KV operations from log entries
+  - Ensure KV store is updated only after log entries are committed
+  - Add proper error handling for state machine application failures
+
+#### Phase 6 Step 2: Client Response Handling (PENDING)
+- [ ] **Async Response System**: Implement proper response flow after log commitment
+  - Add client request tracking with unique request IDs
+  - Implement response delivery after log entries are committed by majority
+  - Add timeout handling for client requests that fail to commit
+- [ ] **Leader Discovery**: Enhance client-server communication for leader changes
+  - Add leader redirection responses for requests sent to followers
+  - Implement client-side leader discovery and retry logic
+  - Add proper error handling for leader election periods
+- [ ] **Error Handling**: Comprehensive error handling for consensus failures
+  - Add specific error types for Raft-related client request failures
+  - Implement proper client notification for failed requests
+  - Add retry mechanisms for transient failures
+
+#### Phase 6 Step 3: Multi-Node Consistency Testing (PENDING)
+- [ ] **Integration Testing**: Add comprehensive tests for client command replication
+  - Create multi-node tests that verify all nodes receive client commands
+  - Test data consistency across all nodes after client operations
+  - Add tests for leader failover during client request processing
+- [ ] **Consistency Verification**: Ensure all nodes have identical state
+  - Add tests that verify KV store consistency across all cluster nodes
+  - Test network partition scenarios with client requests
+  - Verify proper behavior during leader elections with pending requests
+- [ ] **Performance Testing**: Validate system performance with Raft log integration
+  - Measure latency impact of Raft log integration for client commands
+  - Test throughput with multiple concurrent client requests
+  - Verify system stability under high client request load
+
+#### Phase 6 Step 4: Documentation and Validation (PENDING)
+- [ ] **Update Documentation**: Document the new Raft-compliant client command processing
+  - Update system architecture documentation to reflect Raft log integration
+  - Add examples showing proper client command flow through Raft consensus
+  - Document leader-only write processing and follower redirection
+- [ ] **Comprehensive Testing**: Ensure no regressions in existing functionality
+  - Update all existing tests to expect Raft log integration
+  - Verify all 122+ tests continue passing with new implementation
+  - Add new tests specifically for Raft log client command processing
+- [ ] **Raft Specification Compliance**: Verify full compliance with Raft paper requirements
+  - Validate that all client commands go through Raft log replication
+  - Ensure proper leader-only write processing
+  - Verify data consistency guarantees across all cluster nodes
+
+**Success Criteria for Phase 6**:
+1. **All client commands replicated**: Every PUT, DELETE operation goes through Raft log
+2. **Leader-only writes**: Only the current leader accepts write operations
+3. **Follower redirection**: Followers redirect clients to the current leader
+4. **Data consistency**: All nodes have identical KV state after operations commit
+5. **Fault tolerance**: System continues working correctly during leader changes
+6. **No regressions**: All existing tests continue passing
+7. **Performance**: Acceptable latency for client operations through Raft consensus
+
+**Implementation Priority**:
+1. Start with LogEntry and RaftNode integration for client commands
+2. Update server event loop to use Raft log instead of direct processing
+3. Implement proper state machine application from committed log entries
+4. Add comprehensive multi-node testing to verify consistency
+5. Ensure full Raft specification compliance
+
+This phase is critical for making the system truly distributed and consistent according to the Raft consensus algorithm specification.

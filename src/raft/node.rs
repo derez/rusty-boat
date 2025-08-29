@@ -710,12 +710,18 @@ impl RaftNode {
             if let Some(ref log_storage) = self.log_storage {
                 if let Some(entry) = log_storage.get_entry(self.last_applied) {
                     log::debug!(
-                        "Node {} applying log entry {} to state machine",
-                        self.config.node_id, self.last_applied
+                        "Node {} applying log entry {} to state machine (term: {}, {} bytes)",
+                        self.config.node_id, self.last_applied, entry.term, entry.data.len()
                     );
                     
-                    // TODO: Apply entry to actual state machine
-                    // For now, just log the application
+                    // Apply the log entry to the state machine
+                    if let Err(e) = self.apply_log_entry_to_state_machine(&entry) {
+                        log::error!(
+                            "Node {} failed to apply log entry {} to state machine: {}",
+                            self.config.node_id, self.last_applied, e
+                        );
+                        // Continue applying other entries even if one fails
+                    }
                 } else {
                     log::warn!(
                         "Node {} tried to apply missing log entry {}",
@@ -727,6 +733,68 @@ impl RaftNode {
         }
         
         Ok(())
+    }
+    
+    /// Apply a single log entry to the state machine
+    fn apply_log_entry_to_state_machine(&mut self, entry: &LogEntry) -> Result<()> {
+        use crate::kv::KVOperation;
+        
+        // Try to deserialize the log entry data as a KV operation
+        match KVOperation::from_bytes(&entry.data) {
+            Ok(operation) => {
+                log::debug!(
+                    "Node {} applying KV operation to state machine: {:?}",
+                    self.config.node_id, operation
+                );
+                
+                // For now, we just log the operation since we don't have direct access to the KV store
+                // The actual state machine application will be handled by the server event loop
+                // when it detects that new entries have been committed
+                
+                match operation {
+                    KVOperation::Put { ref key, ref value } => {
+                        log::info!(
+                            "Node {} applied PUT operation: key='{}', value_len={}",
+                            self.config.node_id, key, value.len()
+                        );
+                    }
+                    KVOperation::Delete { ref key } => {
+                        log::info!(
+                            "Node {} applied DELETE operation: key='{}'",
+                            self.config.node_id, key
+                        );
+                    }
+                    KVOperation::Get { ref key } => {
+                        log::warn!(
+                            "Node {} found GET operation in log (should not happen): key='{}'",
+                            self.config.node_id, key
+                        );
+                    }
+                    KVOperation::List => {
+                        log::warn!(
+                            "Node {} found LIST operation in log (should not happen)",
+                            self.config.node_id
+                        );
+                    }
+                }
+                
+                Ok(())
+            }
+            Err(e) => {
+                log::warn!(
+                    "Node {} could not deserialize log entry {} as KV operation: {}. Treating as opaque data.",
+                    self.config.node_id, entry.index, e
+                );
+                
+                // If it's not a KV operation, just log it as opaque data
+                log::debug!(
+                    "Node {} applied opaque log entry {} ({} bytes)",
+                    self.config.node_id, entry.index, entry.data.len()
+                );
+                
+                Ok(())
+            }
+        }
     }
     
     /// Advance commit index based on majority replication
@@ -851,6 +919,121 @@ impl RaftNode {
     /// Get access to the network transport
     pub fn get_transport(&self) -> &dyn NetworkTransport {
         self.transport.as_ref().expect("Transport not initialized").as_ref()
+    }
+    
+    /// Append a client command to the Raft log (leader only)
+    pub fn append_client_command(&mut self, command_data: Vec<u8>) -> Result<LogIndex> {
+        // Only leaders can accept client commands
+        if !matches!(self.state, NodeState::Leader) {
+            return Err(Error::Raft(format!(
+                "Node {} is not the leader (current state: {:?}). Current leader: {:?}",
+                self.config.node_id, self.state, self.current_leader
+            )));
+        }
+        
+        // Get the next log index
+        let next_index = if let Some(ref log_storage) = self.log_storage {
+            log_storage.get_last_index() + 1
+        } else {
+            return Err(Error::Raft("Log storage not initialized".to_string()));
+        };
+        
+        // Create a new log entry with the client command
+        let log_entry = LogEntry::new(self.current_term, next_index, command_data);
+        
+        log::info!(
+            "Leader {} appending client command to log at index {} (term {})",
+            self.config.node_id, next_index, self.current_term
+        );
+        
+        // Append the entry to our log
+        if let Some(ref mut log_storage) = self.log_storage {
+            log_storage.append_entries(vec![log_entry.clone()])?;
+        }
+        
+        // Update our match_index for ourselves (leader always has all entries)
+        self.match_index.insert(self.config.node_id, next_index);
+        
+        // Send AppendEntries to all followers to replicate the command
+        self.replicate_log_entry(log_entry)?;
+        
+        Ok(next_index)
+    }
+    
+    /// Replicate a log entry to all followers
+    fn replicate_log_entry(&mut self, entry: LogEntry) -> Result<()> {
+        if !matches!(self.state, NodeState::Leader) {
+            return Ok(());
+        }
+        
+        if let Some(transport) = &self.transport {
+            for &node_id in &self.config.cluster_nodes {
+                if node_id != self.config.node_id {
+                    // Get the previous log index and term for this follower
+                    let next_idx = self.next_index.get(&node_id).copied().unwrap_or(1);
+                    let prev_log_index = next_idx.saturating_sub(1);
+                    
+                    let prev_log_term = if prev_log_index == 0 {
+                        0
+                    } else if let Some(ref log_storage) = self.log_storage {
+                        log_storage.get_entry(prev_log_index).map(|e| e.term).unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    
+                    // Create AppendEntries request with the new entry
+                    let append_request = AppendEntriesRequest::new(
+                        self.current_term,
+                        self.config.node_id,
+                        prev_log_index,
+                        prev_log_term,
+                        vec![entry.clone()],
+                        self.commit_index,
+                    );
+                    
+                    let message = RaftMessage::AppendEntries(append_request);
+                    let message_bytes = message.to_bytes();
+                    
+                    log::debug!(
+                        "Leader {} sending AppendEntries with client command to node {} (prev_log_index: {}, prev_log_term: {})",
+                        self.config.node_id, node_id, prev_log_index, prev_log_term
+                    );
+                    
+                    if let Err(e) = transport.send_message(node_id, message_bytes) {
+                        log::warn!(
+                            "Leader {} failed to send AppendEntries to node {}: {}",
+                            self.config.node_id, node_id, e
+                        );
+                    }
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Check if a log entry at the given index is committed
+    pub fn is_log_entry_committed(&self, log_index: LogIndex) -> bool {
+        log_index <= self.commit_index
+    }
+    
+    /// Get the current leader ID (for follower redirection)
+    pub fn get_current_leader(&self) -> Option<NodeId> {
+        self.current_leader
+    }
+    
+    /// Get the current commit index
+    pub fn get_commit_index(&self) -> LogIndex {
+        self.commit_index
+    }
+    
+    /// Get a log entry at the specified index
+    pub fn get_log_entry(&self, index: LogIndex) -> Option<LogEntry> {
+        if let Some(ref log_storage) = self.log_storage {
+            log_storage.get_entry(index)
+        } else {
+            None
+        }
     }
     
     // ========== SAFETY MECHANISMS ==========
