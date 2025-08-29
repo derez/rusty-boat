@@ -12,26 +12,48 @@ pub use message_bus::{MessageBus, MockEventHandler, EventCounterHandler};
 use crate::{Result, NodeId};
 use std::collections::HashMap;
 
-/// Network address for a node
+/// Network address for a node with dual-port support
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodeAddress {
     /// Node identifier
     pub node_id: NodeId,
     /// Host address (IP or hostname)
     pub host: String,
-    /// Port number
-    pub port: u16,
+    /// Port number for Raft inter-node communication
+    pub raft_port: u16,
+    /// Port number for client communication (raft_port + offset)
+    pub client_port: u16,
 }
 
 impl NodeAddress {
-    /// Create a new node address
-    pub fn new(node_id: NodeId, host: String, port: u16) -> Self {
-        Self { node_id, host, port }
+    /// Create a new node address with default client port offset (+1000)
+    pub fn new(node_id: NodeId, host: String, raft_port: u16) -> Self {
+        Self::with_client_port_offset(node_id, host, raft_port, 1000)
     }
     
-    /// Get the socket address string
+    /// Create a new node address with custom client port offset
+    pub fn with_client_port_offset(node_id: NodeId, host: String, raft_port: u16, client_port_offset: u16) -> Self {
+        Self { 
+            node_id, 
+            host, 
+            raft_port,
+            client_port: raft_port + client_port_offset,
+        }
+    }
+    
+    /// Get the Raft socket address string
+    pub fn raft_socket_addr(&self) -> String {
+        format!("{}:{}", self.host, self.raft_port)
+    }
+    
+    /// Get the client socket address string
+    pub fn client_socket_addr(&self) -> String {
+        format!("{}:{}", self.host, self.client_port)
+    }
+    
+    /// Get the socket address string (backward compatibility - returns Raft port)
     pub fn socket_addr(&self) -> String {
-        format!("{}:{}", self.host, self.port)
+        self.raft_socket_addr()
     }
 }
 
@@ -148,8 +170,22 @@ mod tests {
         let addr = NodeAddress::new(1, "localhost".to_string(), 8080);
         assert_eq!(addr.node_id, 1);
         assert_eq!(addr.host, "localhost");
-        assert_eq!(addr.port, 8080);
-        assert_eq!(addr.socket_addr(), "localhost:8080");
+        assert_eq!(addr.raft_port, 8080);
+        assert_eq!(addr.client_port, 9080); // Default +1000 offset
+        assert_eq!(addr.raft_socket_addr(), "localhost:8080");
+        assert_eq!(addr.client_socket_addr(), "localhost:9080");
+        assert_eq!(addr.socket_addr(), "localhost:8080"); // Backward compatibility
+    }
+
+    #[test]
+    fn test_node_address_custom_offset() {
+        let addr = NodeAddress::with_client_port_offset(1, "localhost".to_string(), 8080, 500);
+        assert_eq!(addr.node_id, 1);
+        assert_eq!(addr.host, "localhost");
+        assert_eq!(addr.raft_port, 8080);
+        assert_eq!(addr.client_port, 8580); // Custom +500 offset
+        assert_eq!(addr.raft_socket_addr(), "localhost:8080");
+        assert_eq!(addr.client_socket_addr(), "localhost:8580");
     }
 
     #[test]

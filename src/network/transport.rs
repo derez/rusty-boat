@@ -31,22 +31,26 @@ use std::io::{Read, Write, BufReader, BufWriter};
 use std::thread;
 use std::time::Duration;
 
-/// TCP-based network transport implementation
+/// TCP-based network transport implementation with dual-port support
 pub struct TcpTransport {
     /// Network configuration
     config: NetworkConfig,
-    /// TCP listener for incoming connections
-    listener: Option<TcpListener>,
+    /// TCP listener for Raft inter-node communication
+    raft_listener: Option<TcpListener>,
+    /// TCP listener for client requests
+    client_listener: Option<TcpListener>,
     /// Connected nodes with their TCP streams
     connections: Arc<Mutex<HashMap<NodeId, TcpStream>>>,
-    /// Incoming message queue
+    /// Incoming Raft message queue
     incoming_messages: Arc<Mutex<Vec<(NodeId, Vec<u8>)>>>,
     /// Client request queue
     client_requests: Arc<Mutex<Vec<(std::net::TcpStream, Vec<u8>)>>>,
     /// Node ID of this transport
     node_id: NodeId,
-    /// Whether the listener thread is running
-    listener_running: Arc<Mutex<bool>>,
+    /// Whether the Raft listener thread is running
+    raft_listener_running: Arc<Mutex<bool>>,
+    /// Whether the client listener thread is running
+    client_listener_running: Arc<Mutex<bool>>,
 }
 
 impl TcpTransport {
@@ -61,55 +65,67 @@ impl TcpTransport {
         result
     }
     
-    /// Create a new TCP transport
+    /// Create a new TCP transport with dual-port support
     pub fn new(config: NetworkConfig, node_id: NodeId, bind_address: &str) -> Result<Self> {
-        // Parse bind address
+        // Parse bind address to get the Raft port
         let bind_addr: SocketAddr = bind_address.parse()
             .map_err(|e| Error::Network(format!("Invalid bind address '{}': {}", bind_address, e)))?;
         
-        // Create TCP listener
-        let listener = TcpListener::bind(bind_addr)
-            .map_err(|e| Error::Network(format!("Failed to bind to {}: {}", bind_addr, e)))?;
+        // Create Raft listener on the specified port
+        let raft_listener = TcpListener::bind(bind_addr)
+            .map_err(|e| Error::Network(format!("Failed to bind Raft listener to {}: {}", bind_addr, e)))?;
         
-        // Set non-blocking mode for the listener
-        listener.set_nonblocking(true)
-            .map_err(|e| Error::Network(format!("Failed to set non-blocking mode: {}", e)))?;
+        // Set non-blocking mode for the Raft listener
+        raft_listener.set_nonblocking(true)
+            .map_err(|e| Error::Network(format!("Failed to set non-blocking mode for Raft listener: {}", e)))?;
         
-        log::info!("TCP transport: listening on {} for node {}", bind_addr, node_id);
+        // Create client listener on port + 1000
+        let client_port = bind_addr.port() + 1000;
+        let client_bind_addr = SocketAddr::new(bind_addr.ip(), client_port);
+        let client_listener = TcpListener::bind(client_bind_addr)
+            .map_err(|e| Error::Network(format!("Failed to bind client listener to {}: {}", client_bind_addr, e)))?;
+        
+        // Set non-blocking mode for the client listener
+        client_listener.set_nonblocking(true)
+            .map_err(|e| Error::Network(format!("Failed to set non-blocking mode for client listener: {}", e)))?;
+        
+        log::info!("TCP transport: Raft listener on {} for node {}", bind_addr, node_id);
+        log::info!("TCP transport: Client listener on {} for node {}", client_bind_addr, node_id);
         
         Ok(Self {
             config,
-            listener: Some(listener),
+            raft_listener: Some(raft_listener),
+            client_listener: Some(client_listener),
             connections: Arc::new(Mutex::new(HashMap::new())),
             incoming_messages: Arc::new(Mutex::new(Vec::new())),
             client_requests: Arc::new(Mutex::new(Vec::new())),
             node_id,
-            listener_running: Arc::new(Mutex::new(false)),
+            raft_listener_running: Arc::new(Mutex::new(false)),
+            client_listener_running: Arc::new(Mutex::new(false)),
         })
     }
     
-    /// Start accepting incoming connections in a background thread
+    /// Start accepting incoming connections on both Raft and client listeners
     pub fn start_listener(&self) -> Result<()> {
-        if let Some(ref listener) = self.listener {
-            let listener_clone = listener.try_clone()
-                .map_err(|e| Error::Network(format!("Failed to clone listener: {}", e)))?;
+        // Start Raft listener thread
+        if let Some(ref raft_listener) = self.raft_listener {
+            let raft_listener_clone = raft_listener.try_clone()
+                .map_err(|e| Error::Network(format!("Failed to clone Raft listener: {}", e)))?;
             let incoming_messages = Arc::clone(&self.incoming_messages);
-            let client_requests = Arc::clone(&self.client_requests);
             let node_id = self.node_id;
             
             thread::spawn(move || {
-                log::debug!("TCP transport: started listener thread for node {}", node_id);
+                log::debug!("TCP transport: started Raft listener thread for node {}", node_id);
                 
                 loop {
-                    match listener_clone.accept() {
+                    match raft_listener_clone.accept() {
                         Ok((mut stream, addr)) => {
-                            log::info!("TCP transport: accepted connection from {}", addr);
+                            log::info!("TCP transport: accepted Raft connection from {}", addr);
                             
-                            // Handle connection in a separate thread
+                            // Handle Raft connection in a separate thread
                             let incoming_messages_clone = Arc::clone(&incoming_messages);
-                            let client_requests_clone = Arc::clone(&client_requests);
                             thread::spawn(move || {
-                                Self::handle_connection(&mut stream, incoming_messages_clone, client_requests_clone, node_id);
+                                Self::handle_raft_connection(&mut stream, incoming_messages_clone, node_id);
                             });
                         }
                         Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -117,7 +133,41 @@ impl TcpTransport {
                             thread::sleep(Duration::from_millis(10));
                         }
                         Err(e) => {
-                            log::error!("TCP transport: error accepting connection: {}", e);
+                            log::error!("TCP transport: error accepting Raft connection: {}", e);
+                            thread::sleep(Duration::from_millis(100));
+                        }
+                    }
+                }
+            });
+        }
+        
+        // Start client listener thread
+        if let Some(ref client_listener) = self.client_listener {
+            let client_listener_clone = client_listener.try_clone()
+                .map_err(|e| Error::Network(format!("Failed to clone client listener: {}", e)))?;
+            let client_requests = Arc::clone(&self.client_requests);
+            let node_id = self.node_id;
+            
+            thread::spawn(move || {
+                log::debug!("TCP transport: started client listener thread for node {}", node_id);
+                
+                loop {
+                    match client_listener_clone.accept() {
+                        Ok((mut stream, addr)) => {
+                            log::info!("TCP transport: accepted client connection from {}", addr);
+                            
+                            // Handle client connection in a separate thread
+                            let client_requests_clone = Arc::clone(&client_requests);
+                            thread::spawn(move || {
+                                Self::handle_client_connection(&mut stream, client_requests_clone, node_id);
+                            });
+                        }
+                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            // No pending connections, sleep briefly
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(e) => {
+                            log::error!("TCP transport: error accepting client connection: {}", e);
                             thread::sleep(Duration::from_millis(100));
                         }
                     }
@@ -128,28 +178,18 @@ impl TcpTransport {
         Ok(())
     }
     
-    /// Handle an incoming TCP connection with proper message framing
-    fn handle_connection(
+    /// Handle an incoming Raft connection (dedicated to Raft inter-node communication)
+    fn handle_raft_connection(
         stream: &mut TcpStream, 
         incoming_messages: Arc<Mutex<Vec<(NodeId, Vec<u8>)>>>,
-        client_requests: Arc<Mutex<Vec<(TcpStream, Vec<u8>)>>>,
         node_id: NodeId
     ) {
-        log::debug!("TCP transport: handling connection for node {}", node_id);
+        log::debug!("TCP transport: handling Raft connection for node {}", node_id);
         
         // Set stream to blocking mode for easier message parsing
         stream.set_nonblocking(false).unwrap_or_else(|e| {
             log::error!("TCP transport: failed to set blocking mode: {}", e);
         });
-        
-        // Clone the stream for writing responses (needed for client requests)
-        let write_stream = match stream.try_clone() {
-            Ok(s) => s,
-            Err(e) => {
-                log::error!("TCP transport: failed to clone stream: {}", e);
-                return;
-            }
-        };
         
         let mut reader = BufReader::new(stream);
         let mut message_buffer = Vec::new();
@@ -163,7 +203,7 @@ impl TcpTransport {
                     
                     // Validate message length
                     if message_len > 1024 * 1024 { // 1MB limit
-                        log::warn!("TCP transport: message too large ({} bytes), closing connection", message_len);
+                        log::warn!("TCP transport: Raft message too large ({} bytes), closing connection", message_len);
                         break;
                     }
                     
@@ -173,27 +213,10 @@ impl TcpTransport {
                     
                     match reader.read_exact(&mut message_buffer) {
                         Ok(()) => {
-                            log::debug!("TCP transport: received {} byte message", message_len);
+                            log::debug!("TCP transport: received {} byte Raft message", message_len);
                             
-                            // Determine message type by checking if it starts with a valid node_id
-                            // Raft messages from send_message() have format: node_id (8 bytes) + raft_message_data
-                            // Client messages have format: kv_operation_data (starts with operation type byte)
-                            
-                            let is_raft_message = if message_buffer.len() >= 8 {
-                                // Check if the first 8 bytes could be a valid node_id
-                                let potential_node_id = u64::from_be_bytes([
-                                    message_buffer[0], message_buffer[1], message_buffer[2], message_buffer[3],
-                                    message_buffer[4], message_buffer[5], message_buffer[6], message_buffer[7]
-                                ]);
-                                
-                                // Raft messages have reasonable node_id values (0-1000) and sufficient length
-                                potential_node_id <= 1000 && message_buffer.len() > 8
-                            } else {
-                                false
-                            };
-                            
-                            if is_raft_message {
-                                // Handle as Raft message
+                            // Raft messages have format: node_id (8 bytes) + raft_message_data
+                            if message_buffer.len() >= 8 {
                                 let sender_node_id = u64::from_be_bytes([
                                     message_buffer[0], message_buffer[1], message_buffer[2], message_buffer[3],
                                     message_buffer[4], message_buffer[5], message_buffer[6], message_buffer[7]
@@ -201,41 +224,101 @@ impl TcpTransport {
                                 
                                 let raft_message_data = message_buffer[8..].to_vec();
                                 
-                                log::debug!("TCP transport: detected Raft message from node {} ({} bytes)", 
+                                log::debug!("TCP transport: processed Raft message from node {} ({} bytes)", 
                                            sender_node_id, raft_message_data.len());
                                 
                                 // Add to incoming message queue
                                 incoming_messages.lock().unwrap().push((sender_node_id, raft_message_data));
                             } else {
-                                // Handle as client request
-                                log::debug!("TCP transport: detected client request ({} bytes)", message_buffer.len());
-                                
-                                // Store the client request for processing by the server event loop
-                                log::debug!("TCP transport: storing client request for server processing");
-                                client_requests.lock().unwrap().push((write_stream.try_clone().unwrap(), message_buffer.clone()));
-                                
-                                // Client requests are one-shot, close connection after queuing
+                                log::warn!("TCP transport: invalid Raft message format (too short)");
                                 break;
                             }
                         }
                         Err(e) => {
-                            log::error!("TCP transport: error reading message data: {}", e);
+                            log::error!("TCP transport: error reading Raft message data: {}", e);
                             break;
                         }
                     }
                 }
                 Err(e) => {
                     if e.kind() == std::io::ErrorKind::UnexpectedEof {
-                        log::info!("TCP transport: connection closed by peer");
+                        log::info!("TCP transport: Raft connection closed by peer");
                     } else {
-                        log::error!("TCP transport: error reading message length: {}", e);
+                        log::error!("TCP transport: error reading Raft message length: {}", e);
                     }
                     break;
                 }
             }
         }
         
-        log::debug!("TCP transport: connection handler exiting for node {}", node_id);
+        log::debug!("TCP transport: Raft connection handler exiting for node {}", node_id);
+    }
+    
+    /// Handle an incoming client connection (dedicated to client requests)
+    fn handle_client_connection(
+        stream: &mut TcpStream, 
+        client_requests: Arc<Mutex<Vec<(TcpStream, Vec<u8>)>>>,
+        node_id: NodeId
+    ) {
+        log::debug!("TCP transport: handling client connection for node {}", node_id);
+        
+        // Set stream to blocking mode for easier message parsing
+        stream.set_nonblocking(false).unwrap_or_else(|e| {
+            log::error!("TCP transport: failed to set blocking mode: {}", e);
+        });
+        
+        // Clone the stream for writing responses
+        let write_stream = match stream.try_clone() {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("TCP transport: failed to clone client stream: {}", e);
+                return;
+            }
+        };
+        
+        let mut reader = BufReader::new(stream);
+        let mut message_buffer = Vec::new();
+        
+        // Client connections are typically one request-response cycles
+        // First, read just the 4-byte length header
+        let mut length_buffer = [0u8; 4];
+        match reader.read_exact(&mut length_buffer) {
+            Ok(()) => {
+                let message_len = u32::from_be_bytes(length_buffer) as usize;
+                
+                // Validate message length
+                if message_len > 1024 * 1024 { // 1MB limit
+                    log::warn!("TCP transport: client message too large ({} bytes), closing connection", message_len);
+                    return;
+                }
+                
+                // Read the complete message data
+                message_buffer.resize(message_len, 0);
+                
+                match reader.read_exact(&mut message_buffer) {
+                    Ok(()) => {
+                        log::debug!("TCP transport: received {} byte client request", message_len);
+                        
+                        // Store the client request for processing by the server event loop
+                        client_requests.lock().unwrap().push((write_stream, message_buffer));
+                        
+                        log::debug!("TCP transport: queued client request for server processing");
+                    }
+                    Err(e) => {
+                        log::error!("TCP transport: error reading client message data: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                    log::info!("TCP transport: client connection closed by peer");
+                } else {
+                    log::error!("TCP transport: error reading client message length: {}", e);
+                }
+            }
+        }
+        
+        log::debug!("TCP transport: client connection handler exiting for node {}", node_id);
     }
     
     /// Process client request data using actual KV store operations

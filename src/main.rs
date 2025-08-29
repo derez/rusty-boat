@@ -103,8 +103,15 @@ fn print_usage(program_name: &str) {
     println!("  # Start server with custom timing");
     println!("  {} server --node-id 0 --bind localhost:8080 --cluster localhost:8080,localhost:8081,localhost:8082 --event-loop-delay 500 --heartbeat-interval 1000", program_name);
     println!();
-    println!("  # Start interactive client");
+    println!("  # Start interactive client (automatically connects to client ports +1000)");
     println!("  {} client --cluster localhost:8080,localhost:8081,localhost:8082 --verbose", program_name);
+    println!();
+    println!("Network Architecture:");
+    println!("  Servers listen on dual ports:");
+    println!("    - Raft port (specified): Inter-node consensus communication");
+    println!("    - Client port (+1000): Client request handling");
+    println!("  Example: Server on 8080 → Raft: 8080, Client: 9080");
+    println!("  Clients automatically connect to client ports (+1000 offset)");
     println!();
     println!("Timing modes:");
     println!("  fast:  Production timing (10ms event loop, 50ms heartbeat, 150-300ms election)");
@@ -142,8 +149,8 @@ fn run_server(args: &[String], verbose: bool) -> Result<()> {
         let parts: Vec<&str> = address.split(':').collect();
         if parts.len() == 2 {
             let host = parts[0].to_string();
-            if let Ok(port) = parts[1].parse::<u16>() {
-                let node_address = network::NodeAddress::new(*node_id, host, port);
+            if let Ok(raft_port) = parts[1].parse::<u16>() {
+                let node_address = network::NodeAddress::new(*node_id, host, raft_port);
                 network_config.add_node(node_address);
             }
         }
