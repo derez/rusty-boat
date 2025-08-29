@@ -32,12 +32,7 @@
 //!     let transport = Box::new(network::MockTransport::new(0));
 //!     
 //!     // Create Raft configuration
-//!     let config = RaftConfig {
-//!         node_id: 0,
-//!         cluster_nodes: vec![0, 1, 2],
-//!         election_timeout_ms: (150, 300),
-//!         heartbeat_interval_ms: 50,
-//!     };
+//!     let config = RaftConfig::fast(0, vec![0, 1, 2]);
 //!     
 //!     // Initialize Raft node
 //!     let _raft_node = RaftNode::with_dependencies(
@@ -55,6 +50,7 @@ pub mod raft;
 pub mod storage;
 pub mod network;
 pub mod kv;
+pub mod timing;
 
 #[cfg(test)]
 pub mod tests;
@@ -64,6 +60,7 @@ pub use raft::{RaftNode, RaftState, RaftConfig, RaftMessage};
 pub use storage::{LogStorage, StateStorage, KVStorage};
 pub use network::{NetworkTransport, MessageBus, NetworkConfig, NodeAddress};
 pub use kv::{KVStore, KVClient, KVOperation, KVResponse};
+pub use timing::{TimingConfig, TimingMode};
 
 /// Common result type used throughout the library
 pub type Result<T> = std::result::Result<T, Error>;

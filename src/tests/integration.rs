@@ -32,12 +32,7 @@ impl TestCluster {
         
         // Create each node with dependencies
         for &node_id in &node_ids {
-            let config = RaftConfig {
-                node_id,
-                cluster_nodes: node_ids.clone(),
-                election_timeout_ms: (150, 300),
-                heartbeat_interval_ms: 50,
-            };
+        let config = RaftConfig::fast(node_id, node_ids.clone());
             
             let state_storage = Box::new(InMemoryStateStorage::new());
             let log_storage = Box::new(InMemoryLogStorage::new());

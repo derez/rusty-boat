@@ -223,7 +223,7 @@ impl RaftNode {
         Instant::now().hash(&mut hasher);
         let hash = hasher.finish();
         
-        let (min_ms, max_ms) = self.config.election_timeout_ms;
+        let (min_ms, max_ms) = self.config.election_timeout_ms();
         let range = max_ms - min_ms;
         let timeout_ms = min_ms + (hash % range);
         
@@ -1154,12 +1154,7 @@ mod tests {
 
     #[test]
     fn test_election_timeout_handling() {
-        let config = RaftConfig {
-            node_id: 0,
-            cluster_nodes: vec![0, 1, 2], // 3-node cluster so we don't immediately become leader
-            election_timeout_ms: (150, 300),
-            heartbeat_interval_ms: 50,
-        };
+        let config = RaftConfig::fast(0, vec![0, 1, 2]); // 3-node cluster so we don't immediately become leader
         let state_storage = Box::new(InMemoryStateStorage::new());
         let log_storage = Box::new(InMemoryLogStorage::new());
         let transport = Box::new(MockTransport::new(0));
@@ -1180,12 +1175,7 @@ mod tests {
 
     #[test]
     fn test_single_node_election() {
-        let config = RaftConfig {
-            node_id: 0,
-            cluster_nodes: vec![0],
-            election_timeout_ms: (150, 300),
-            heartbeat_interval_ms: 50,
-        };
+        let config = RaftConfig::fast(0, vec![0]);
         
         let state_storage = Box::new(InMemoryStateStorage::new());
         let log_storage = Box::new(InMemoryLogStorage::new());
@@ -1202,12 +1192,7 @@ mod tests {
 
     #[test]
     fn test_vote_request_handling() {
-        let config = RaftConfig {
-            node_id: 1,
-            cluster_nodes: vec![0, 1, 2],
-            election_timeout_ms: (150, 300),
-            heartbeat_interval_ms: 50,
-        };
+        let config = RaftConfig::fast(1, vec![0, 1, 2]);
         
         let state_storage = Box::new(InMemoryStateStorage::new());
         let log_storage = Box::new(InMemoryLogStorage::new());
@@ -1228,12 +1213,7 @@ mod tests {
 
     #[test]
     fn test_vote_request_denial() {
-        let config = RaftConfig {
-            node_id: 1,
-            cluster_nodes: vec![0, 1, 2],
-            election_timeout_ms: (150, 300),
-            heartbeat_interval_ms: 50,
-        };
+        let config = RaftConfig::fast(1, vec![0, 1, 2]);
         
         let state_storage = Box::new(InMemoryStateStorage::new());
         let log_storage = Box::new(InMemoryLogStorage::new());
@@ -1255,12 +1235,7 @@ mod tests {
 
     #[test]
     fn test_vote_request_higher_term() {
-        let config = RaftConfig {
-            node_id: 1,
-            cluster_nodes: vec![0, 1, 2],
-            election_timeout_ms: (150, 300),
-            heartbeat_interval_ms: 50,
-        };
+        let config = RaftConfig::fast(1, vec![0, 1, 2]);
         
         let state_storage = Box::new(InMemoryStateStorage::new());
         let log_storage = Box::new(InMemoryLogStorage::new());
@@ -1285,12 +1260,7 @@ mod tests {
 
     #[test]
     fn test_vote_response_handling() {
-        let config = RaftConfig {
-            node_id: 0,
-            cluster_nodes: vec![0, 1, 2],
-            election_timeout_ms: (150, 300),
-            heartbeat_interval_ms: 50,
-        };
+        let config = RaftConfig::fast(0, vec![0, 1, 2]);
         
         let state_storage = Box::new(InMemoryStateStorage::new());
         let log_storage = Box::new(InMemoryLogStorage::new());
@@ -1314,12 +1284,7 @@ mod tests {
 
     #[test]
     fn test_vote_response_higher_term() {
-        let config = RaftConfig {
-            node_id: 0,
-            cluster_nodes: vec![0, 1, 2],
-            election_timeout_ms: (150, 300),
-            heartbeat_interval_ms: 50,
-        };
+        let config = RaftConfig::fast(0, vec![0, 1, 2]);
         
         let state_storage = Box::new(InMemoryStateStorage::new());
         let log_storage = Box::new(InMemoryLogStorage::new());
@@ -1344,12 +1309,7 @@ mod tests {
 
     #[test]
     fn test_election_majority_calculation() {
-        let config = RaftConfig {
-            node_id: 0,
-            cluster_nodes: vec![0, 1, 2, 3, 4], // 5 nodes, need 3 for majority
-            election_timeout_ms: (150, 300),
-            heartbeat_interval_ms: 50,
-        };
+        let config = RaftConfig::fast(0, vec![0, 1, 2, 3, 4]); // 5 nodes, need 3 for majority
         
         let state_storage = Box::new(InMemoryStateStorage::new());
         let log_storage = Box::new(InMemoryLogStorage::new());
@@ -1374,12 +1334,7 @@ mod tests {
 
     #[test]
     fn test_election_split_vote() {
-        let config = RaftConfig {
-            node_id: 0,
-            cluster_nodes: vec![0, 1, 2, 3, 4], // 5 nodes, need 3 for majority
-            election_timeout_ms: (150, 300),
-            heartbeat_interval_ms: 50,
-        };
+        let config = RaftConfig::fast(0, vec![0, 1, 2, 3, 4]); // 5 nodes, need 3 for majority
         
         let state_storage = Box::new(InMemoryStateStorage::new());
         let log_storage = Box::new(InMemoryLogStorage::new());
@@ -1415,12 +1370,7 @@ mod tests {
 
     #[test]
     fn test_election_timeout_reset() {
-        let config = RaftConfig {
-            node_id: 1,
-            cluster_nodes: vec![0, 1, 2],
-            election_timeout_ms: (150, 300),
-            heartbeat_interval_ms: 50,
-        };
+        let config = RaftConfig::fast(1, vec![0, 1, 2]);
         
         let mut node = RaftNode::new(config);
         
@@ -1441,12 +1391,7 @@ mod tests {
 
     #[test]
     fn test_log_up_to_date_comparison() {
-        let config = RaftConfig {
-            node_id: 1,
-            cluster_nodes: vec![0, 1, 2],
-            election_timeout_ms: (150, 300),
-            heartbeat_interval_ms: 50,
-        };
+        let config = RaftConfig::fast(1, vec![0, 1, 2]);
         
         let state_storage = Box::new(InMemoryStateStorage::new());
         let mut log_storage = InMemoryLogStorage::new();
@@ -1473,12 +1418,7 @@ mod tests {
 
     #[test]
     fn test_append_entries_heartbeat() {
-        let config = RaftConfig {
-            node_id: 1,
-            cluster_nodes: vec![0, 1, 2],
-            election_timeout_ms: (150, 300),
-            heartbeat_interval_ms: 50,
-        };
+        let config = RaftConfig::fast(1, vec![0, 1, 2]);
         
         let state_storage = Box::new(InMemoryStateStorage::new());
         let log_storage = Box::new(InMemoryLogStorage::new());
@@ -1500,12 +1440,7 @@ mod tests {
 
     #[test]
     fn test_append_entries_with_entries() {
-        let config = RaftConfig {
-            node_id: 1,
-            cluster_nodes: vec![0, 1, 2],
-            election_timeout_ms: (150, 300),
-            heartbeat_interval_ms: 50,
-        };
+        let config = RaftConfig::fast(1, vec![0, 1, 2]);
         
         let state_storage = Box::new(InMemoryStateStorage::new());
         let log_storage = Box::new(InMemoryLogStorage::new());
@@ -1531,12 +1466,7 @@ mod tests {
 
     #[test]
     fn test_append_entries_log_consistency_check() {
-        let config = RaftConfig {
-            node_id: 1,
-            cluster_nodes: vec![0, 1, 2],
-            election_timeout_ms: (150, 300),
-            heartbeat_interval_ms: 50,
-        };
+        let config = RaftConfig::fast(1, vec![0, 1, 2]);
         
         let state_storage = Box::new(InMemoryStateStorage::new());
         let mut log_storage = InMemoryLogStorage::new();
@@ -1570,12 +1500,7 @@ mod tests {
 
     #[test]
     fn test_append_entries_higher_term() {
-        let config = RaftConfig {
-            node_id: 1,
-            cluster_nodes: vec![0, 1, 2],
-            election_timeout_ms: (150,300),
-            heartbeat_interval_ms: 50,
-        };
+        let config = RaftConfig::fast(1, vec![0, 1, 2]);
         
         let state_storage = Box::new(InMemoryStateStorage::new());
         let log_storage = Box::new(InMemoryLogStorage::new());
@@ -1601,12 +1526,7 @@ mod tests {
 
     #[test]
     fn test_append_entries_commit_index_update() {
-        let config = RaftConfig {
-            node_id: 1,
-            cluster_nodes: vec![0, 1, 2],
-            election_timeout_ms: (150, 300),
-            heartbeat_interval_ms: 50,
-        };
+        let config = RaftConfig::fast(1, vec![0, 1, 2]);
         
         let state_storage = Box::new(InMemoryStateStorage::new());
         let log_storage = Box::new(InMemoryLogStorage::new());
@@ -1630,12 +1550,7 @@ mod tests {
 
     #[test]
     fn test_append_entries_response_handling() {
-        let config = RaftConfig {
-            node_id: 0,
-            cluster_nodes: vec![0, 1, 2],
-            election_timeout_ms: (150, 300),
-            heartbeat_interval_ms: 50,
-        };
+        let config = RaftConfig::fast(0, vec![0, 1, 2]);
         
         let state_storage = Box::new(InMemoryStateStorage::new());
         let mut log_storage = InMemoryLogStorage::new();
@@ -1678,12 +1593,7 @@ mod tests {
 
     #[test]
     fn test_leader_state_initialization() {
-        let config = RaftConfig {
-            node_id: 0,
-            cluster_nodes: vec![0, 1, 2],
-            election_timeout_ms: (150, 300),
-            heartbeat_interval_ms: 50,
-        };
+        let config = RaftConfig::fast(0, vec![0, 1, 2]);
         
         let state_storage = Box::new(InMemoryStateStorage::new());
         let mut log_storage = InMemoryLogStorage::new();
@@ -1710,12 +1620,7 @@ mod tests {
 
     #[test]
     fn test_commit_index_advancement() {
-        let config = RaftConfig {
-            node_id: 0,
-            cluster_nodes: vec![0, 1, 2], // 3 nodes, need 2 for majority
-            election_timeout_ms: (150, 300),
-            heartbeat_interval_ms: 50,
-        };
+        let config = RaftConfig::fast(0, vec![0, 1, 2]); // 3 nodes, need 2 for majority
         
         let state_storage = Box::new(InMemoryStateStorage::new());
         let mut log_storage = InMemoryLogStorage::new();
@@ -1764,12 +1669,7 @@ mod tests {
 
     #[test]
     fn test_heartbeat_sending() {
-        let config = RaftConfig {
-            node_id: 0,
-            cluster_nodes: vec![0, 1, 2],
-            election_timeout_ms: (150, 300),
-            heartbeat_interval_ms: 50,
-        };
+        let config = RaftConfig::fast(0, vec![0, 1, 2]);
         
         let state_storage = Box::new(InMemoryStateStorage::new());
         let log_storage = Box::new(InMemoryLogStorage::new());
@@ -1792,12 +1692,7 @@ mod tests {
 
     #[test]
     fn test_log_conflict_resolution() {
-        let config = RaftConfig {
-            node_id: 1,
-            cluster_nodes: vec![0, 1, 2],
-            election_timeout_ms: (150, 300),
-            heartbeat_interval_ms: 50,
-        };
+        let config = RaftConfig::fast(1, vec![0, 1, 2]);
         
         let state_storage = Box::new(InMemoryStateStorage::new());
         let mut log_storage = InMemoryLogStorage::new();
@@ -1870,12 +1765,7 @@ mod tests {
 
     #[test]
     fn test_election_safety_validation() {
-        let config = RaftConfig {
-            node_id: 1,
-            cluster_nodes: vec![0, 1, 2],
-            election_timeout_ms: (150, 300),
-            heartbeat_interval_ms: 50,
-        };
+        let config = RaftConfig::fast(1, vec![0, 1, 2]);
         
         let state_storage = Box::new(InMemoryStateStorage::new());
         let log_storage = Box::new(InMemoryLogStorage::new());
@@ -1902,12 +1792,7 @@ mod tests {
 
     #[test]
     fn test_leader_append_only_validation() {
-        let config = RaftConfig {
-            node_id: 0,
-            cluster_nodes: vec![0, 1, 2],
-            election_timeout_ms: (150, 300),
-            heartbeat_interval_ms: 50,
-        };
+        let config = RaftConfig::fast(0, vec![0, 1, 2]);
         
         let state_storage = Box::new(InMemoryStateStorage::new());
         let mut log_storage = InMemoryLogStorage::new();
@@ -1944,12 +1829,7 @@ mod tests {
 
     #[test]
     fn test_log_matching_validation() {
-        let config = RaftConfig {
-            node_id: 1,
-            cluster_nodes: vec![0, 1, 2],
-            election_timeout_ms: (150, 300),
-            heartbeat_interval_ms: 50,
-        };
+        let config = RaftConfig::fast(1, vec![0, 1, 2]);
         
         let state_storage = Box::new(InMemoryStateStorage::new());
         let mut log_storage = InMemoryLogStorage::new();
@@ -1982,12 +1862,7 @@ mod tests {
 
     #[test]
     fn test_leader_completeness_validation() {
-        let config = RaftConfig {
-            node_id: 1,
-            cluster_nodes: vec![0, 1, 2],
-            election_timeout_ms: (150, 300),
-            heartbeat_interval_ms: 50,
-        };
+        let config = RaftConfig::fast(1, vec![0, 1, 2]);
         
         let state_storage = Box::new(InMemoryStateStorage::new());
         let mut log_storage = InMemoryLogStorage::new();
@@ -2021,12 +1896,7 @@ mod tests {
 
     #[test]
     fn test_vote_safety_integration() {
-        let config = RaftConfig {
-            node_id: 1,
-            cluster_nodes: vec![0, 1, 2],
-            election_timeout_ms: (150, 300),
-            heartbeat_interval_ms: 50,
-        };
+        let config = RaftConfig::fast(1, vec![0, 1, 2]);
         
         let state_storage = Box::new(InMemoryStateStorage::new());
         let mut log_storage = InMemoryLogStorage::new();
@@ -2059,12 +1929,7 @@ mod tests {
 
     #[test]
     fn test_append_entries_safety_integration() {
-        let config = RaftConfig {
-            node_id: 1,
-            cluster_nodes: vec![0, 1, 2],
-            election_timeout_ms: (150, 300),
-            heartbeat_interval_ms: 50,
-        };
+        let config = RaftConfig::fast(1, vec![0, 1, 2]);
         
         let state_storage = Box::new(InMemoryStateStorage::new());
         let mut log_storage = InMemoryLogStorage::new();
@@ -2100,12 +1965,7 @@ mod tests {
 
     #[test]
     fn test_safety_mechanisms_prevent_split_brain() {
-        let config = RaftConfig {
-            node_id: 1,
-            cluster_nodes: vec![0, 1, 2],
-            election_timeout_ms: (150, 300),
-            heartbeat_interval_ms: 50,
-        };
+        let config = RaftConfig::fast(1, vec![0, 1, 2]);
         
         let state_storage = Box::new(InMemoryStateStorage::new());
         let log_storage = Box::new(InMemoryLogStorage::new());
@@ -2130,12 +1990,7 @@ mod tests {
 
     #[test]
     fn test_safety_mechanisms_preserve_committed_entries() {
-        let config = RaftConfig {
-            node_id: 1,
-            cluster_nodes: vec![0, 1, 2],
-            election_timeout_ms: (150, 300),
-            heartbeat_interval_ms: 50,
-        };
+        let config = RaftConfig::fast(1, vec![0, 1, 2]);
         
         let state_storage = Box::new(InMemoryStateStorage::new());
         let mut log_storage = InMemoryLogStorage::new();

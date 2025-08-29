@@ -5,8 +5,8 @@
 
 use kvapp_c::{
     self as kvapp,
-    storage, network, kv, raft,
-    NodeId, Result, Error,
+    storage, network, kv, raft, timing,
+    NodeId, Result, Error, TimingConfig, TimingMode,
 };
 
 fn main() {
@@ -63,8 +63,8 @@ fn main() {
 
 fn print_usage(program_name: &str) {
     println!("Usage:");
-    println!("  {} server --node-id <id> --bind <host:port> --cluster <node1:port1,node2:port2,...> [--data-dir <path>] [--verbose]", program_name);
-    println!("  {} client --cluster <node1:port1,node2:port2,...> [--verbose]", program_name);
+    println!("  {} server --node-id <id> --bind <host:port> --cluster <node1:port1,node2:port2,...> [OPTIONS]", program_name);
+    println!("  {} client --cluster <node1:port1,node2:port2,...> [OPTIONS]", program_name);
     println!();
     println!("Server mode:");
     println!("  --node-id <id>     Unique node identifier (0, 1, 2, ...)");
@@ -75,12 +75,41 @@ fn print_usage(program_name: &str) {
     println!("Client mode:");
     println!("  --cluster <nodes>  Comma-separated list of cluster nodes to connect to");
     println!();
+    println!("Timing options (server mode only):");
+    println!("  --timing-mode <mode>        Preset timing mode: fast, debug, demo");
+    println!("  --fast-mode                 Use fast timing (production, default)");
+    println!("  --debug-mode                Use debug timing (moderate delays)");
+    println!("  --demo-mode                 Use demo timing (slow for observation)");
+    println!("  --event-loop-delay <ms>     Event loop delay in milliseconds");
+    println!("  --heartbeat-interval <ms>   Heartbeat interval in milliseconds");
+    println!("  --election-timeout-min <ms> Minimum election timeout in milliseconds");
+    println!("  --election-timeout-max <ms> Maximum election timeout in milliseconds");
+    println!("  --network-delay <ms>        Network message delay in milliseconds");
+    println!("  --client-delay <ms>         Client request delay in milliseconds");
+    println!();
     println!("Global options:");
     println!("  --verbose, -v      Enable debug logging");
     println!();
     println!("Examples:");
+    println!("  # Start server with default (fast) timing");
     println!("  {} server --node-id 0 --bind localhost:8080 --cluster localhost:8080,localhost:8081,localhost:8082", program_name);
+    println!();
+    println!("  # Start server with debug timing for easier log reading");
+    println!("  {} server --node-id 0 --bind localhost:8080 --cluster localhost:8080,localhost:8081,localhost:8082 --debug-mode --verbose", program_name);
+    println!();
+    println!("  # Start server with demo timing for slow observation");
+    println!("  {} server --node-id 0 --bind localhost:8080 --cluster localhost:8080,localhost:8081,localhost:8082 --demo-mode --verbose", program_name);
+    println!();
+    println!("  # Start server with custom timing");
+    println!("  {} server --node-id 0 --bind localhost:8080 --cluster localhost:8080,localhost:8081,localhost:8082 --event-loop-delay 500 --heartbeat-interval 1000", program_name);
+    println!();
+    println!("  # Start interactive client");
     println!("  {} client --cluster localhost:8080,localhost:8081,localhost:8082 --verbose", program_name);
+    println!();
+    println!("Timing modes:");
+    println!("  fast:  Production timing (10ms event loop, 50ms heartbeat, 150-300ms election)");
+    println!("  debug: Debug timing (100ms event loop, 500ms heartbeat, 1500-3000ms election)");
+    println!("  demo:  Demo timing (1000ms event loop, 2000ms heartbeat, 5000-10000ms election)");
 }
 
 fn run_server(args: &[String], verbose: bool) -> Result<()> {
@@ -129,13 +158,12 @@ fn run_server(args: &[String], verbose: bool) -> Result<()> {
     // Start the TCP listener for incoming connections
     transport.start_listener()?;
     
-    // Create Raft configuration
-    let raft_config = raft::RaftConfig {
-        node_id: config.node_id,
-        cluster_nodes: config.cluster_addresses.keys().cloned().collect(),
-        election_timeout_ms: (150, 300),
-        heartbeat_interval_ms: 50,
-    };
+    // Create Raft configuration with timing from parsed arguments
+    let raft_config = raft::RaftConfig::new(
+        config.node_id,
+        config.cluster_addresses.keys().cloned().collect(),
+        config.timing.clone(),
+    );
     
     // Initialize Raft node
     let mut raft_node = raft::RaftNode::with_dependencies(
@@ -161,7 +189,7 @@ fn run_server(args: &[String], verbose: bool) -> Result<()> {
     log::info!("Server initialized successfully");
     
     // Start the server event loop
-    run_server_loop(&mut raft_node, &mut kv_store, &message_bus)?;
+    run_server_loop(&mut raft_node, &mut kv_store, &message_bus, &config.timing)?;
     
     Ok(())
 }
@@ -188,14 +216,16 @@ fn run_server_loop(
     raft_node: &mut raft::RaftNode,
     kv_store: &mut kv::InMemoryKVStore,
     message_bus: &network::MessageBus,
+    timing_config: &TimingConfig,
 ) -> Result<()> {
     use std::time::{Duration, Instant};
     use std::thread;
     
-    log::info!("Starting server event loop");
+    log::info!("Starting server event loop with timing config: event_loop_delay={}ms, heartbeat_interval={}ms", 
+               timing_config.event_loop_delay_ms, timing_config.heartbeat_interval_ms);
     
     let mut last_heartbeat = Instant::now();
-    let heartbeat_interval = Duration::from_millis(50);
+    let heartbeat_interval = timing_config.heartbeat_interval();
     
     loop {
         // Check for election timeout
@@ -211,17 +241,17 @@ fn run_server_loop(
         }
         
         // Process any pending network messages
-        if let Err(e) = process_network_messages(raft_node, kv_store) {
+        if let Err(e) = process_network_messages(raft_node, kv_store, timing_config) {
             log::error!("Error processing network messages: {}", e);
         }
         
         // Process any client requests
-        if let Err(e) = process_client_requests(raft_node, kv_store) {
+        if let Err(e) = process_client_requests(raft_node, kv_store, timing_config) {
             log::error!("Error processing client requests: {}", e);
         }
         
-        // Small sleep to prevent busy waiting
-        thread::sleep(Duration::from_millis(10));
+        // Apply configurable event loop delay
+        timing_config.apply_event_loop_delay();
         
         // Check for shutdown signal
         // TODO: Implement graceful shutdown
@@ -364,6 +394,7 @@ fn process_client_command(client: &mut kv::KVClient, input: &str) -> Result<()> 
 fn process_network_messages(
     raft_node: &mut raft::RaftNode,
     _kv_store: &mut kv::InMemoryKVStore,
+    timing_config: &TimingConfig,
 ) -> Result<()> {
     // Get the transport from the Raft node to check for incoming messages
     let raw_messages = raft_node.get_transport().receive_messages();
@@ -438,6 +469,7 @@ fn process_network_messages(
 fn process_client_requests(
     raft_node: &mut raft::RaftNode,
     kv_store: &mut kv::InMemoryKVStore,
+    timing_config: &TimingConfig,
 ) -> Result<()> {
     // Get the transport and check for client requests
     let transport = raft_node.get_transport();
@@ -477,6 +509,7 @@ struct ServerConfig {
     bind_address: String,
     cluster_addresses: std::collections::HashMap<NodeId, String>,
     data_dir: String,
+    timing: TimingConfig,
 }
 
 #[derive(Debug)]
@@ -489,6 +522,15 @@ fn parse_server_args(args: &[String]) -> Result<ServerConfig> {
     let mut bind_address = None;
     let mut cluster_spec = None;
     let mut data_dir = "./data".to_string();
+    
+    // Timing configuration parameters
+    let mut timing_mode: Option<TimingMode> = None;
+    let mut event_loop_delay: Option<u64> = None;
+    let mut heartbeat_interval: Option<u64> = None;
+    let mut election_timeout_min: Option<u64> = None;
+    let mut election_timeout_max: Option<u64> = None;
+    let mut network_delay: Option<u64> = None;
+    let mut client_delay: Option<u64> = None;
     
     let mut i = 0;
     while i < args.len() {
@@ -522,6 +564,74 @@ fn parse_server_args(args: &[String]) -> Result<ServerConfig> {
                 data_dir = args[i + 1].clone();
                 i += 2;
             }
+            "--timing-mode" => {
+                if i + 1 >= args.len() {
+                    return Err(Error::Raft("Missing value for --timing-mode".to_string()));
+                }
+                timing_mode = Some(args[i + 1].parse::<TimingMode>()
+                    .map_err(|e| Error::Raft(format!("Invalid timing mode: {}", e)))?);
+                i += 2;
+            }
+            "--event-loop-delay" => {
+                if i + 1 >= args.len() {
+                    return Err(Error::Raft("Missing value for --event-loop-delay".to_string()));
+                }
+                event_loop_delay = Some(args[i + 1].parse::<u64>()
+                    .map_err(|_| Error::Raft("Invalid event loop delay".to_string()))?);
+                i += 2;
+            }
+            "--heartbeat-interval" => {
+                if i + 1 >= args.len() {
+                    return Err(Error::Raft("Missing value for --heartbeat-interval".to_string()));
+                }
+                heartbeat_interval = Some(args[i + 1].parse::<u64>()
+                    .map_err(|_| Error::Raft("Invalid heartbeat interval".to_string()))?);
+                i += 2;
+            }
+            "--election-timeout-min" => {
+                if i + 1 >= args.len() {
+                    return Err(Error::Raft("Missing value for --election-timeout-min".to_string()));
+                }
+                election_timeout_min = Some(args[i + 1].parse::<u64>()
+                    .map_err(|_| Error::Raft("Invalid election timeout min".to_string()))?);
+                i += 2;
+            }
+            "--election-timeout-max" => {
+                if i + 1 >= args.len() {
+                    return Err(Error::Raft("Missing value for --election-timeout-max".to_string()));
+                }
+                election_timeout_max = Some(args[i + 1].parse::<u64>()
+                    .map_err(|_| Error::Raft("Invalid election timeout max".to_string()))?);
+                i += 2;
+            }
+            "--network-delay" => {
+                if i + 1 >= args.len() {
+                    return Err(Error::Raft("Missing value for --network-delay".to_string()));
+                }
+                network_delay = Some(args[i + 1].parse::<u64>()
+                    .map_err(|_| Error::Raft("Invalid network delay".to_string()))?);
+                i += 2;
+            }
+            "--client-delay" => {
+                if i + 1 >= args.len() {
+                    return Err(Error::Raft("Missing value for --client-delay".to_string()));
+                }
+                client_delay = Some(args[i + 1].parse::<u64>()
+                    .map_err(|_| Error::Raft("Invalid client delay".to_string()))?);
+                i += 2;
+            }
+            "--fast-mode" => {
+                timing_mode = Some(TimingMode::Fast);
+                i += 1;
+            }
+            "--debug-mode" => {
+                timing_mode = Some(TimingMode::Debug);
+                i += 1;
+            }
+            "--demo-mode" => {
+                timing_mode = Some(TimingMode::Demo);
+                i += 1;
+            }
             "--verbose" | "-v" => {
                 // Skip verbose flag, already handled in main
                 i += 1;
@@ -538,11 +648,62 @@ fn parse_server_args(args: &[String]) -> Result<ServerConfig> {
     
     let cluster_addresses = parse_cluster_spec(&cluster_spec)?;
     
+    // Build timing configuration
+    let timing = if let Some(mode) = timing_mode {
+        let mut config = mode.to_config();
+        
+        // Override with custom values if provided
+        if let Some(delay) = event_loop_delay {
+            config.event_loop_delay_ms = delay;
+        }
+        if let Some(interval) = heartbeat_interval {
+            config.heartbeat_interval_ms = interval;
+        }
+        if let Some(min) = election_timeout_min {
+            config.election_timeout_min_ms = min;
+        }
+        if let Some(max) = election_timeout_max {
+            config.election_timeout_max_ms = max;
+        }
+        if let Some(delay) = network_delay {
+            config.network_delay_ms = delay;
+        }
+        if let Some(delay) = client_delay {
+            config.client_delay_ms = delay;
+        }
+        
+        // Validate the final configuration
+        if config.election_timeout_min_ms >= config.election_timeout_max_ms {
+            return Err(Error::Raft("Election timeout minimum must be less than maximum".to_string()));
+        }
+        if config.heartbeat_interval_ms >= config.election_timeout_min_ms {
+            return Err(Error::Raft("Heartbeat interval must be less than election timeout minimum".to_string()));
+        }
+        
+        config
+    } else if event_loop_delay.is_some() || heartbeat_interval.is_some() || 
+              election_timeout_min.is_some() || election_timeout_max.is_some() ||
+              network_delay.is_some() || client_delay.is_some() {
+        // Custom timing parameters provided without mode
+        TimingConfig::custom(
+            event_loop_delay.unwrap_or(10),
+            heartbeat_interval.unwrap_or(50),
+            election_timeout_min.unwrap_or(150),
+            election_timeout_max.unwrap_or(300),
+            network_delay.unwrap_or(0),
+            client_delay.unwrap_or(0),
+        )?
+    } else {
+        // Default to fast mode
+        TimingConfig::fast()
+    };
+    
     Ok(ServerConfig {
         node_id,
         bind_address,
         cluster_addresses,
         data_dir,
+        timing,
     })
 }
 
